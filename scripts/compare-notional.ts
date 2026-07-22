@@ -11,6 +11,7 @@ interface CycleRow {
   makerFillRatio: number;
   openChaseAttempts: number;
   holdTimeMs?: number;
+  pnlUsd?: number; // fee-exclusive realized PnL - only present on cycles recorded after the pnl tagging change
 }
 
 function readJsonl(path: string): Record<string, unknown>[] {
@@ -43,7 +44,9 @@ console.log(
     "avgAttempts".padStart(13) +
     "avgVol/cyc".padStart(12) +
     "avgBps".padStart(9) +
-    "avgHoldMs".padStart(11)
+    "avgHoldMs".padStart(11) +
+    "avgPnl$".padStart(9) +
+    "allIn$/1M".padStart(11)
 );
 
 for (const n of [...notionals].sort((a, b) => a - b)) {
@@ -57,6 +60,15 @@ for (const n of [...notionals].sort((a, b) => a - b)) {
   const holds = cs.map((c) => c.holdTimeMs).filter((v): v is number => v != null);
   const avgHold = holds.length ? holds.reduce((a, v) => a + v, 0) / holds.length : NaN;
 
+  // All-in $/1M = (fees - pnl) / volume, over only the cycles that have pnl tagged.
+  // dpnl excludes fees (verified against deposit deltas), so cost is fees MINUS pnl.
+  const pnlCycles = cs.filter((c): c is CycleRow & { pnlUsd: number } => c.pnlUsd != null);
+  const avgPnl = pnlCycles.length ? pnlCycles.reduce((a, c) => a + c.pnlUsd, 0) / pnlCycles.length : NaN;
+  const pnlVol = pnlCycles.reduce((a, c) => a + c.volumeUsd, 0);
+  const allInPerMillion = pnlVol > 0
+    ? (pnlCycles.reduce((a, c) => a + (c.bpsBurned / 10000) * c.volumeUsd - c.pnlUsd, 0) / pnlVol) * 1e6
+    : NaN;
+
   console.log(
     `$${n}`.padEnd(10) +
       String(cs.length).padStart(11) +
@@ -65,6 +77,8 @@ for (const n of [...notionals].sort((a, b) => a - b)) {
       avgAttempts.toFixed(2).padStart(13) +
       `$${avgVol.toFixed(0)}`.padStart(12) +
       avgBps.toFixed(2).padStart(9) +
-      avgHold.toFixed(0).padStart(11)
+      avgHold.toFixed(0).padStart(11) +
+      avgPnl.toFixed(3).padStart(9) +
+      allInPerMillion.toFixed(0).padStart(11)
   );
 }

@@ -49,6 +49,7 @@ export interface CycleInput {
   closeTrace?: ExecutionTrace;
   openedAtMs?: number;
   closedAtMs?: number;
+  pnlUsd?: number; // realized dpnl from the exchange (excludes fees - verified against deposit deltas)
 }
 
 export interface CycleSummary {
@@ -65,6 +66,22 @@ export interface CycleSummary {
   holdTimeMs?: number;
   openAdverseBps?: number;
   closeAdverseBps?: number;
+  pnlUsd?: number; // per-cycle realized PnL, fee-exclusive - all-in cycle cost = fees - pnlUsd
+  // Whether the taker fallback fired on each leg (trace.takerOrder set = maker
+  // chase didn't finish the job in time). For closes specifically, this is the
+  // number needed to answer "how often does CLOSE_MAKER_FIRST actually work"
+  // - unmeasurable any other way since a taker-only close never attempts a
+  // maker chase at all, so there's no historical data on close maker fill rate.
+  openUsedTaker: boolean;
+  closeUsedTaker?: boolean;
+  closeChaseAttempts?: number; // 0 when closeMakerFirst=false (instant close skips the chase loop entirely)
+  // Config snapshot beyond notionalUsd, so A/B runs of ANY knob can be grouped
+  // offline the same way compare-notional groups by notional.
+  closeMakerFirst: boolean;
+  maxTakerSlippageBps: number;
+  trendGuardMaxDriftBps: number;
+  chaseAbortDriftBps: number;
+  makerChaseAttempts: number;
 }
 
 export class MetricsTracker {
@@ -129,6 +146,15 @@ export class MetricsTracker {
       holdTimeMs,
       openAdverseBps,
       closeAdverseBps,
+      pnlUsd: input.pnlUsd,
+      openUsedTaker: openTrace.takerOrder != null,
+      closeUsedTaker: closeTrace ? closeTrace.takerOrder != null : undefined,
+      closeChaseAttempts: closeTrace?.chaseAttempts,
+      closeMakerFirst: config.closeMakerFirst,
+      maxTakerSlippageBps: config.maxTakerSlippageBps,
+      trendGuardMaxDriftBps: config.trendGuardMaxDriftBps,
+      chaseAbortDriftBps: config.chaseAbortDriftBps,
+      makerChaseAttempts: config.makerChaseAttempts,
     };
 
     this.summaries.push(summary);

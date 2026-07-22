@@ -1,8 +1,8 @@
-# Perpl Volume Bot (SOL)
+# Perpl Volume Bot (BTC)
 
 A volume-farming bot for [Perpl](https://app.perpl.xyz) (perp DEX on Monad), built to
 maximize points-weighted trading volume at the lowest possible cost. Developed and
-tuned live on mainnet; the current model is tagged `main-model-sol`.
+tuned live on mainnet, currently trading BTC (`MARKET_ID=1`).
 
 ## The model (why it's cheap)
 
@@ -16,16 +16,21 @@ asymmetry:
   NEVER pays taker fees to open. If one side won't fill (trending market), it flips
   long/short, because the opposite side fills easily in a trend.
 - **Closes are instant market orders.** Free either way, so the only cost is the
-  half-spread (~0.1bps on SOL), and the position's market risk ends within seconds.
+  half-spread (varies per market - ~0.1bps was measured on SOL, see below), and the
+  position's market risk ends within seconds.
 - **Trend guard.** It refuses to open when mid price moved more than 3.5bps in the
   last 10s. Maker fills in a trending market are adversely selected (you get filled
   precisely when price runs through you) - waiting for chop cut measured PnL drag by
   ~60%.
 - Cycles alternate long/short, so net directional exposure stays ~flat.
 
-## Measured results (mainnet SOL, $100 notional/leg, 10x)
+## Measured results (historical benchmark: mainnet SOL, $100 notional/leg, 10x)
 
-From a continuous 1-hour run (185 positions, audited against exchange fill records):
+These numbers are from an earlier SOL run and are kept here as a reference point for
+the model's mechanics - they have NOT been re-measured on BTC (the market this bot
+currently trades) and will differ somewhat with BTC's own spread/fee/liquidity
+profile. From a continuous 1-hour run on SOL (185 positions, audited against exchange
+fill records):
 
 | Metric | Value |
 |---|---|
@@ -84,7 +89,7 @@ Key `.env` knobs:
 
 | Var | Meaning |
 |---|---|
-| `MARKET_ID` | 31 = SOL mainnet (BTC=1, MON=10, ETH=20, HYPE=40, ZEC=50). Prefer boosted-points markets with deep OI. |
+| `MARKET_ID` | 1 = BTC mainnet (SOL=31, MON=10, ETH=20, HYPE=40, ZEC=50). Prefer boosted-points markets with deep OI. |
 | `NOTIONAL_USD` | Size per leg. Validated at 25-100; margin used per cycle = notional/leverage. |
 | `LEVERAGE` | Auto-clamped to each market's real max (initial_margin/100). |
 | `TARGET_VOLUME_USD` | Stop after this much true volume (0 = no cap). |
@@ -103,8 +108,9 @@ Every cycle prints a `[totals]` line with live volume, fees, and $-per-1M burn.
 - **Audit any run against exchange records** (ground truth, not the bot's own logs):
   `npx tsx scripts/audit-run.ts <runStartEpochMs>` - prints true volume, fees, PnL,
   all-in burn, maker ratio, and volume/hour.
-- Orders on Perpl live at most `order_ttl_blocks` (~8s on SOL); the bot handles this,
-  but it's why you see constant re-posting in the logs.
+- Orders on Perpl live at most `order_ttl_blocks` (varies per market, ~8s was
+  measured on SOL); the bot handles this, but it's why you see constant re-posting
+  in the logs.
 - Perpl's docs warn wash-trading detection can cut points multipliers. This bot runs
   a single wallet with alternating sides, but it IS metronomic - for long 24/7
   operation consider varying notional/timing, and don't run mirrored wallets.

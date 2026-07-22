@@ -13,20 +13,30 @@ const LIVE_XLSX_FILE = `${LOG_DIR}fees-log${LABEL_SUFFIX}.xlsx`;
 // One row per run (keyed by run start time) so runs can be compared side by side.
 const RUNS_SUMMARY_FILE = `${LOG_DIR}runs-summary${LABEL_SUFFIX}.xlsx`;
 
+// New columns must always be appended at the END of these lists, never inserted
+// in the middle - openOrCreate() only ever re-syncs row 1's labels, it never
+// moves any previously-written row's cells. Inserting a column mid-list shifts
+// what every old row's existing values line up against, silently mislabeling
+// them under the new header (this happened once - see logs/backup-pre-repair/).
 const LIVE_HEADERS = [
   "Timestamp",
   "Fees Spent ($, cumulative)",
-  "PNL ($, cumulative)",
-  "Costs ($, cumulative)",
   "Initial Deposit ($)",
   "Current Deposit ($)",
   "Volume ($, cumulative)",
   "Fees per $1M Volume ($)",
+  "Run Duration (H:MM:SS)",
+  "PNL ($, cumulative)",
+  "Costs ($, cumulative)",
   "PNL per $1M Volume ($)",
   "Costs per $1M Volume ($)",
-  "Run Duration (H:MM:SS)",
 ];
 
+// Runs-summary uses a different sign convention than the live ledger below:
+// Fees is shown NEGATIVE (money that left the deposit) and Costs = Fees + PNL,
+// a net result where negative = net lost money, positive = net made money -
+// reads like a bank statement line. (Live ledger keeps Costs = Fees - PNL,
+// positive-when-losing, per the original request for that file.)
 const RUNS_HEADERS = [
   "Run Start",
   "Last Update",
@@ -40,6 +50,7 @@ const RUNS_HEADERS = [
   "Fees per $1M ($)",
   "PNL per $1M ($)",
   "Costs per $1M ($)",
+  "Volume per Hour ($)",
 ];
 
 function formatDuration(ms: number): string {
@@ -92,9 +103,14 @@ export interface CloseLogEntry {
   cumulativeVolumeUsd: number;
 }
 
-/** Costs = Fees + PNL (dollar sum). PNL is negative when losing, so this shrinks the cost by however much PNL adds back on top of fees. */
+/**
+ * Costs = Fees - PNL. Perpl's dpnl (source of PNL) excludes fees - verified
+ * against real deposit balance deltas - so this, not Fees+PNL, is what
+ * actually matches how much the deposit shrinks. PNL is negative when
+ * losing, so a loss ADDS to cost; a PNL gain SUBTRACTS from it.
+ */
 function costsUsd(entry: CloseLogEntry): number {
-  return entry.cumulativeFeesUsd + entry.cumulativePnlUsd;
+  return entry.cumulativeFeesUsd - entry.cumulativePnlUsd;
 }
 
 async function appendLiveRow(sheet: Sheet, entry: CloseLogEntry): Promise<void> {
@@ -103,20 +119,20 @@ async function appendLiveRow(sheet: Sheet, entry: CloseLogEntry): Promise<void> 
   const pnlPerMillion =
     entry.cumulativeVolumeUsd > 0 ? (entry.cumulativePnlUsd / entry.cumulativeVolumeUsd) * 1e6 : 0;
   const costs = costsUsd(entry);
-  const costsPerMillion = feesPerMillion + pnlPerMillion;
+  const costsPerMillion = feesPerMillion - pnlPerMillion;
 
   sheet.worksheet.addRow([
     new Date(entry.atMs).toISOString(),
     Number(entry.cumulativeFeesUsd.toFixed(4)),
-    Number(entry.cumulativePnlUsd.toFixed(4)),
-    Number(costs.toFixed(4)),
     entry.initialBalanceUsd != null ? Number(entry.initialBalanceUsd.toFixed(2)) : "n/a",
     entry.currentBalanceUsd != null ? Number(entry.currentBalanceUsd.toFixed(2)) : "n/a",
     Number(entry.cumulativeVolumeUsd.toFixed(2)),
     Number(feesPerMillion.toFixed(2)),
+    formatDuration(entry.atMs - entry.runStartMs),
+    Number(entry.cumulativePnlUsd.toFixed(4)),
+    Number(costs.toFixed(4)),
     Number(pnlPerMillion.toFixed(2)),
     Number(costsPerMillion.toFixed(2)),
-    formatDuration(entry.atMs - entry.runStartMs),
   ]);
 
   await sheet.workbook.xlsx.writeFile(sheet.filePath);
@@ -131,26 +147,30 @@ async function appendLiveRow(sheet: Sheet, entry: CloseLogEntry): Promise<void> 
  * an abrupt kill mid-run still leaves the latest known state on disk.
  */
 async function upsertRunRow(sheet: Sheet, entry: CloseLogEntry): Promise<void> {
-  const feesPerMillion =
-    entry.cumulativeVolumeUsd > 0 ? (entry.cumulativeFeesUsd / entry.cumulativeVolumeUsd) * 1e6 : 0;
+  const feesNeg = -entry.cumulativeFeesUsd;
+  const feesPerMillionNeg =
+    entry.cumulativeVolumeUsd > 0 ? -(entry.cumulativeFeesUsd / entry.cumulativeVolumeUsd) * 1e6 : 0;
   const pnlPerMillion =
     entry.cumulativeVolumeUsd > 0 ? (entry.cumulativePnlUsd / entry.cumulativeVolumeUsd) * 1e6 : 0;
-  const costs = costsUsd(entry);
-  const costsPerMillion = feesPerMillion + pnlPerMillion;
+  const netCosts = feesNeg + entry.cumulativePnlUsd;
+  const netCostsPerMillion = feesPerMillionNeg + pnlPerMillion;
+  const durationMs = entry.atMs - entry.runStartMs;
+  const volumePerHour = durationMs > 0 ? entry.cumulativeVolumeUsd / (durationMs / 3_600_000) : 0;
   const startIso = new Date(entry.runStartMs).toISOString();
   const values = [
     startIso,
     new Date(entry.atMs).toISOString(),
-    formatDuration(entry.atMs - entry.runStartMs),
+    formatDuration(durationMs),
     entry.initialBalanceUsd != null ? Number(entry.initialBalanceUsd.toFixed(2)) : "n/a",
     entry.currentBalanceUsd != null ? Number(entry.currentBalanceUsd.toFixed(2)) : "n/a",
     Number(entry.cumulativeVolumeUsd.toFixed(2)),
-    Number(entry.cumulativeFeesUsd.toFixed(4)),
+    Number(feesNeg.toFixed(4)),
     Number(entry.cumulativePnlUsd.toFixed(4)),
-    Number(costs.toFixed(4)),
-    Number(feesPerMillion.toFixed(2)),
+    Number(netCosts.toFixed(4)),
+    Number(feesPerMillionNeg.toFixed(2)),
     Number(pnlPerMillion.toFixed(2)),
-    Number(costsPerMillion.toFixed(2)),
+    Number(netCostsPerMillion.toFixed(2)),
+    Number(volumePerHour.toFixed(2)),
   ];
 
   let targetRow: ExcelJS.Row | undefined;

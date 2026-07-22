@@ -412,6 +412,10 @@ async function runSession(shared: SharedState): Promise<void> {
           throw new Error(`[cycle ${cycleId}] could not fully close the position after retries`);
         }
 
+        const closedPos = trading.getPosition(position.pid);
+        const pnlUsd = Number(closedPos?.dpnl ?? "0") / 1e6;
+        shared.totalPnlUsd += pnlUsd;
+
         const summary = metrics.recordCycle({
           cycleId,
           marketId: market.id,
@@ -424,11 +428,8 @@ async function runSession(shared: SharedState): Promise<void> {
           closeTrace,
           openedAtMs,
           closedAtMs,
+          pnlUsd,
         });
-
-        const closedPos = trading.getPosition(position.pid);
-        const pnlUsd = Number(closedPos?.dpnl ?? "0") / 1e6;
-        shared.totalPnlUsd += pnlUsd;
         console.log(
           `[cycle ${cycleId}] done: PnL ${pnlUsd < 0 ? "-" : "+"}$${Math.abs(pnlUsd).toFixed(2)}, ` +
             `held ${((summary.holdTimeMs ?? 0) / 1000).toFixed(1)}s ` +
