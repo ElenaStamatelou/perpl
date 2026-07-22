@@ -1,0 +1,30 @@
+{
+  "name": "perpl-volume-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "enroll-key": "tsx scripts/enroll-key.ts",
+    "bot": "tsx src/bot.ts",
+    "new-account": "scripts/new-account.sh",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "pm2:start": "pm2 start ecosystem.config.cjs",
+    "pm2:stop": "pm2 stop ecosystem.config.cjs",
+    "pm2:logs": "pm2 logs",
+    "pm2:status": "pm2 status"
+  },
+  "dependencies": {
+    "@noble/ed25519": "^2.1.0",
+    "dotenv": "^16.4.5",
+    "ethers": "^6.13.4",
+    "exceljs": "^4.4.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.15",
+    "@types/ws": "^8.5.12",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.2"
+  }
+}
