@@ -12,7 +12,9 @@ import {
 import { logEvent } from "./eventLog.js";
 import { MetricsTracker } from "./metrics.js";
 import { OrderFlags, OrderType, type Account, type Position, type Wallet } from "./types.js";
-import { logCloseToXlsx } from "./xlsxLog.js";
+import { logCloseToXlsx, logPeriodSnapshotToXlsx } from "./xlsxLog.js";
+
+const TWELVE_HOURS_MS = 12 * 60 * 60 * 1000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -194,6 +196,10 @@ interface SharedState {
   // platform's own PNL figure, unlike totalFeesUsd which is fees only.
   totalPnlUsd: number;
   runStartMs: number;
+  // Start of the current ~12h snapshot window (see TWELVE_HOURS_MS below) -
+  // survives restarts same as the totals, so a mid-window restart doesn't reset
+  // the clock and produce a short extra row.
+  periodStartMs: number;
   stopRequested: boolean;
   // AUSD deposit balance, tracked from wallet/account push updates for the xlsx log.
   // initialBalanceUsd is captured once (first balance seen) and never overwritten.
@@ -451,6 +457,23 @@ async function runSession(shared: SharedState): Promise<void> {
           currentBalanceUsd: shared.currentBalanceUsd,
           cumulativeVolumeUsd: shared.totalVolumeUsd,
         });
+
+        if (closedAtMs - shared.periodStartMs >= TWELVE_HOURS_MS) {
+          const periodStartMs = shared.periodStartMs;
+          shared.periodStartMs = closedAtMs;
+          await logPeriodSnapshotToXlsx(
+            {
+              atMs: closedAtMs,
+              runStartMs: shared.runStartMs,
+              cumulativeFeesUsd: shared.totalFeesUsd,
+              cumulativePnlUsd: shared.totalPnlUsd,
+              initialBalanceUsd: shared.initialBalanceUsd,
+              currentBalanceUsd: shared.currentBalanceUsd,
+              cumulativeVolumeUsd: shared.totalVolumeUsd,
+            },
+            periodStartMs
+          );
+        }
       } finally {
         watchdog.cancel();
       }
@@ -484,6 +507,7 @@ async function main() {
     totalFeesUsd: 0,
     totalPnlUsd: 0,
     runStartMs: Date.now(),
+    periodStartMs: Date.now(),
     stopRequested: false,
   };
 

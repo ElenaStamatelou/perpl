@@ -11,7 +11,10 @@ const LABEL_SUFFIX = config.botLabel === "default" ? "" : `.${config.botLabel}`;
 // Ever-growing ledger: every close from every run/restart appends a row here.
 const LIVE_XLSX_FILE = `${LOG_DIR}fees-log${LABEL_SUFFIX}.xlsx`;
 // One row per run (keyed by run start time) so runs can be compared side by side.
-const RUNS_SUMMARY_FILE = `${LOG_DIR}runs-summary${LABEL_SUFFIX}.xlsx`;
+const SUMMARY_PER_RUN_FILE = `${LOG_DIR}summary-per-run${LABEL_SUFFIX}.xlsx`;
+// One row appended every ~12h of elapsed run time, so progress can be reviewed
+// on a fixed cadence without waiting for a run to end or opening the live ledger.
+const SUMMARY_12H_FILE = `${LOG_DIR}summary-12h${LABEL_SUFFIX}.xlsx`;
 
 // New columns must always be appended at the END of these lists, never inserted
 // in the middle - openOrCreate() only ever re-syncs row 1's labels, it never
@@ -37,9 +40,28 @@ const LIVE_HEADERS = [
 // a net result where negative = net lost money, positive = net made money -
 // reads like a bank statement line. (Live ledger keeps Costs = Fees - PNL,
 // positive-when-losing, per the original request for that file.)
-const RUNS_HEADERS = [
+const RUN_SUMMARY_HEADERS = [
   "Run Start",
   "Last Update",
+  "Duration (H:MM:SS)",
+  "Initial Deposit ($)",
+  "Current Deposit ($)",
+  "Volume ($)",
+  "Fees ($)",
+  "PNL ($)",
+  "Costs ($)",
+  "Fees per $1M ($)",
+  "PNL per $1M ($)",
+  "Costs per $1M ($)",
+  "Volume per Hour ($)",
+];
+
+// Same shape as RUN_SUMMARY_HEADERS, but "Run Start"/"Last Update" become
+// "Period Start"/"Period End" since this file is a sequence of periodic
+// snapshots, not one row per run.
+const SUMMARY_12H_HEADERS = [
+  "Period Start",
+  "Period End",
   "Duration (H:MM:SS)",
   "Initial Deposit ($)",
   "Current Deposit ($)",
@@ -138,15 +160,8 @@ async function appendLiveRow(sheet: Sheet, entry: CloseLogEntry): Promise<void> 
   await sheet.workbook.xlsx.writeFile(sheet.filePath);
 }
 
-/**
- * Finds the row for this run (matched by its Run Start timestamp in column 1)
- * and overwrites it with the latest totals, or appends a new row if this is
- * the run's first close. Upserting (rather than appending every close) keeps
- * exactly one row per run so runs line up for easy side-by-side comparison,
- * and it's kept current in real time - not just written once at the end - so
- * an abrupt kill mid-run still leaves the latest known state on disk.
- */
-async function upsertRunRow(sheet: Sheet, entry: CloseLogEntry): Promise<void> {
+/** Cumulative-since-run-start figures shared by the per-run and 12h summary rows. */
+function summaryRowValues(entry: CloseLogEntry, periodStartMs: number): (string | number)[] {
   const feesNeg = -entry.cumulativeFeesUsd;
   const feesPerMillionNeg =
     entry.cumulativeVolumeUsd > 0 ? -(entry.cumulativeFeesUsd / entry.cumulativeVolumeUsd) * 1e6 : 0;
@@ -156,9 +171,8 @@ async function upsertRunRow(sheet: Sheet, entry: CloseLogEntry): Promise<void> {
   const netCostsPerMillion = feesPerMillionNeg + pnlPerMillion;
   const durationMs = entry.atMs - entry.runStartMs;
   const volumePerHour = durationMs > 0 ? entry.cumulativeVolumeUsd / (durationMs / 3_600_000) : 0;
-  const startIso = new Date(entry.runStartMs).toISOString();
-  const values = [
-    startIso,
+  return [
+    new Date(periodStartMs).toISOString(),
     new Date(entry.atMs).toISOString(),
     formatDuration(durationMs),
     entry.initialBalanceUsd != null ? Number(entry.initialBalanceUsd.toFixed(2)) : "n/a",
@@ -172,6 +186,19 @@ async function upsertRunRow(sheet: Sheet, entry: CloseLogEntry): Promise<void> {
     Number(netCostsPerMillion.toFixed(2)),
     Number(volumePerHour.toFixed(2)),
   ];
+}
+
+/**
+ * Finds the row for this run (matched by its Run Start timestamp in column 1)
+ * and overwrites it with the latest totals, or appends a new row if this is
+ * the run's first close. Upserting (rather than appending every close) keeps
+ * exactly one row per run so runs line up for easy side-by-side comparison,
+ * and it's kept current in real time - not just written once at the end - so
+ * an abrupt kill mid-run still leaves the latest known state on disk.
+ */
+async function upsertRunRow(sheet: Sheet, entry: CloseLogEntry): Promise<void> {
+  const startIso = new Date(entry.runStartMs).toISOString();
+  const values = summaryRowValues(entry, entry.runStartMs);
 
   let targetRow: ExcelJS.Row | undefined;
   for (let i = 2; i <= sheet.worksheet.rowCount; i++) {
@@ -192,20 +219,42 @@ async function upsertRunRow(sheet: Sheet, entry: CloseLogEntry): Promise<void> {
   await sheet.workbook.xlsx.writeFile(sheet.filePath);
 }
 
+/**
+ * Always appends (never upserts) - each call is a new periodic snapshot, not a
+ * running update of the same row, so the file builds a history of cumulative
+ * totals sampled every ~12h across the run's lifetime.
+ */
+async function appendPeriodRow(sheet: Sheet, entry: CloseLogEntry, periodStartMs: number): Promise<void> {
+  sheet.worksheet.addRow(summaryRowValues(entry, periodStartMs));
+  await sheet.workbook.xlsx.writeFile(sheet.filePath);
+}
+
 let liveSheetPromise: Promise<Sheet> | undefined;
 function getLiveSheet(): Promise<Sheet> {
   if (!liveSheetPromise) liveSheetPromise = openOrCreate(LIVE_XLSX_FILE, LIVE_HEADERS);
   return liveSheetPromise;
 }
 
-let runsSummarySheetPromise: Promise<Sheet> | undefined;
-function getRunsSummarySheet(): Promise<Sheet> {
-  if (!runsSummarySheetPromise) runsSummarySheetPromise = openOrCreate(RUNS_SUMMARY_FILE, RUNS_HEADERS);
-  return runsSummarySheetPromise;
+let summaryPerRunSheetPromise: Promise<Sheet> | undefined;
+function getSummaryPerRunSheet(): Promise<Sheet> {
+  if (!summaryPerRunSheetPromise) summaryPerRunSheetPromise = openOrCreate(SUMMARY_PER_RUN_FILE, RUN_SUMMARY_HEADERS);
+  return summaryPerRunSheetPromise;
 }
 
-/** Appends a row to the live per-close ledger and upserts this run's row in the all-runs comparison sheet. */
+let summary12hSheetPromise: Promise<Sheet> | undefined;
+function getSummary12hSheet(): Promise<Sheet> {
+  if (!summary12hSheetPromise) summary12hSheetPromise = openOrCreate(SUMMARY_12H_FILE, SUMMARY_12H_HEADERS);
+  return summary12hSheetPromise;
+}
+
+/** Appends a row to the live per-close ledger and upserts this run's row in the per-run summary sheet. */
 export async function logCloseToXlsx(entry: CloseLogEntry): Promise<void> {
-  const [live, runs] = await Promise.all([getLiveSheet(), getRunsSummarySheet()]);
+  const [live, runs] = await Promise.all([getLiveSheet(), getSummaryPerRunSheet()]);
   await Promise.all([appendLiveRow(live, entry), upsertRunRow(runs, entry)]);
+}
+
+/** Appends one cumulative-totals snapshot row to summary-12h.xlsx. periodStartMs marks the start of this ~12h window. */
+export async function logPeriodSnapshotToXlsx(entry: CloseLogEntry, periodStartMs: number): Promise<void> {
+  const sheet = await getSummary12hSheet();
+  await appendPeriodRow(sheet, entry, periodStartMs);
 }
