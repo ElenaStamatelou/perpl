@@ -270,6 +270,17 @@ async function runSession(shared: SharedState): Promise<void> {
     await waitForEvent(trading, "positions", 8000).catch(() => undefined);
     await closeLeftoverPosition(trading, market.id);
 
+    // Fires once per successfully connected session (initial start AND any
+    // supervisor auto-recovery reconnect) - this is the earliest point that
+    // genuinely confirms both WS feeds, auth, and chain sync all worked, not
+    // just that the process launched.
+    await sendNtfyMessage(
+      "Perpl Bot - connected",
+      `Network: ${config.network} | Market: ${market.symbol} (id ${market.id})\n` +
+        `Account: ${trading.getAccountId()}\n` +
+        `Chain head block: ${trading.getCurrentBlock()}`
+    );
+
     const metrics = new MetricsTracker();
 
     // Deposit balance for the xlsx log: "wallet" carries the full account list
