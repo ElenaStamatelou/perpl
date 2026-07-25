@@ -123,4 +123,8 @@ export const config = {
   // Set chaseAbortDriftBps to 0 to disable.
   chaseAbortDriftBps: Number(process.env.CHASE_ABORT_DRIFT_BPS ?? 3.5),
   chaseAbortConfirmAttempts: Number(process.env.CHASE_ABORT_CONFIRM_ATTEMPTS) || 2,
+
+  // Optional: periodic summary push via ntfy.sh (https://ntfy.sh/<topic>, no account
+  // needed). Blank = disabled (no-op).
+  ntfyTopic: process.env.NTFY_TOPIC?.trim() || "",
 };

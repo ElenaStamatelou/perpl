@@ -13,8 +13,25 @@ import { logEvent } from "./eventLog.js";
 import { MetricsTracker } from "./metrics.js";
 import { OrderFlags, OrderType, type Account, type Position, type Wallet } from "./types.js";
 import { logCloseToXlsx, logPeriodSnapshotToXlsx } from "./xlsxLog.js";
+import { sendNtfyMessage } from "./ntfyNotifier.js";
 
 const TWELVE_HOURS_MS = 12 * 60 * 60 * 1000;
+
+function formatPeriodSummaryMessage(shared: SharedState, periodStartMs: number, periodEndMs: number): string {
+  const durationMs = periodEndMs - shared.runStartMs;
+  const netCosts = shared.totalFeesUsd - shared.totalPnlUsd;
+  const costsPerMillion = shared.totalVolumeUsd > 0 ? (netCosts / shared.totalVolumeUsd) * 1e6 : 0;
+  const volumePerHour = durationMs > 0 ? shared.totalVolumeUsd / (durationMs / 3_600_000) : 0;
+  return (
+    `Period: ${new Date(periodStartMs).toISOString()} -> ${new Date(periodEndMs).toISOString()}\n` +
+    `Run duration so far: ${(durationMs / 3_600_000).toFixed(1)}h\n` +
+    `Deposit: $${shared.currentBalanceUsd?.toFixed(2) ?? "n/a"}\n` +
+    `Volume: $${shared.totalVolumeUsd.toFixed(2)}\n` +
+    `Fees: $${shared.totalFeesUsd.toFixed(2)} | PnL: $${shared.totalPnlUsd.toFixed(2)} | Net cost: $${netCosts.toFixed(2)}\n` +
+    `Cost: $${costsPerMillion.toFixed(0)} per $1M volume\n` +
+    `Volume/hour: $${volumePerHour.toFixed(0)}`
+  );
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -472,6 +489,10 @@ async function runSession(shared: SharedState): Promise<void> {
               cumulativeVolumeUsd: shared.totalVolumeUsd,
             },
             periodStartMs
+          );
+          await sendNtfyMessage(
+            "Perpl Bot - 12h summary",
+            formatPeriodSummaryMessage(shared, periodStartMs, closedAtMs)
           );
         }
       } finally {
