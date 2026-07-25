@@ -1,4 +1,4 @@
-# Perpl Volume Bot (BTC)
+# Perpl Volume Bot (SOL)
 
 A volume-farming bot for [Perpl](https://app.perpl.xyz) (perp DEX on Monad), built to
 maximize points-weighted trading volume at the lowest possible cost. Developed and
