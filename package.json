@@ -6,7 +6,6 @@
   "scripts": {
     "enroll-key": "tsx scripts/enroll-key.ts",
     "bot": "tsx src/bot.ts",
-    "new-account": "scripts/new-account.sh",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
     "pm2:start": "pm2 start ecosystem.config.cjs",

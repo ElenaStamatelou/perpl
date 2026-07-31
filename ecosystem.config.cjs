@@ -1,4 +1,4 @@
-// pm2 process manager config - keeps the bot(s) running unattended (auto-restart
+// pm2 process manager config - keeps the bot running unattended (auto-restart
 // on crash, auto-start on VPS reboot via `pm2 startup` + `pm2 save`).
 //
 // Setup:  npm install -g pm2
@@ -6,13 +6,10 @@
 // Logs:   npm run pm2:logs
 // Status: npm run pm2:status
 // Stop:   npm run pm2:stop
-//
-// Add another account: scripts/new-account.sh account3, fill in its .env.account3,
-// then add another entry below pointing DOTENV_CONFIG_PATH at that file.
 module.exports = {
   apps: [
     {
-      name: "perpl-bot-default",
+      name: "perpl-bot",
       script: "./node_modules/.bin/tsx",
       args: "src/bot.ts",
       env: { DOTENV_CONFIG_PATH: ".env" },
@@ -26,14 +23,5 @@ module.exports = {
       // short enough not to hang a deploy/restart indefinitely.
       kill_timeout: 100_000,
     },
-    // {
-    //   name: "perpl-bot-account2",
-    //   script: "./node_modules/.bin/tsx",
-    //   args: "src/bot.ts",
-    //   env: { DOTENV_CONFIG_PATH: ".env.account2" },
-    //   autorestart: true,
-    //   max_restarts: 50,
-    //   restart_delay: 5000,
-    // },
   ],
 };

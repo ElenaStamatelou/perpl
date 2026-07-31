@@ -58,12 +58,7 @@ export const config = {
   // 0 = first account on the wallet; otherwise the pinned account id (see above).
   accountId: pinnedAccountId,
 
-  // Identifies this process when running several instances (e.g. one per wallet)
-  // side by side - keeps each instance's cycle log separate. Default "default"
-  // preserves the original unlabeled logs/cycles.jsonl filename exactly.
-  botLabel: process.env.BOT_LABEL?.trim() || "default",
-
-  // Trading parameters. Default 31 = SOL on mainnet (see rank-markets analysis for current pick).
+  // Trading parameters. Default 31 = SOL on mainnet.
   marketId: Number(process.env.MARKET_ID) || 31,
   notionalUsd: Number(process.env.NOTIONAL_USD) || 2500,
   leverage: Number(process.env.LEVERAGE) || 10,
@@ -101,8 +96,7 @@ export const config = {
     : Number(process.env.MAX_RUNTIME_MIN) || 0,
   cycleRestMs: Number(process.env.CYCLE_REST_MS) || 1000,
   // Optional: if both set, the rest between cycles is randomized in this range
-  // instead of using the fixed cycleRestMs above. Useful when running multiple
-  // instances (different wallets) so their cadences don't look identical/correlated.
+  // instead of using the fixed cycleRestMs above.
   cycleRestMinMs: process.env.CYCLE_REST_MIN_MS ? Number(process.env.CYCLE_REST_MIN_MS) : undefined,
   cycleRestMaxMs: process.env.CYCLE_REST_MAX_MS ? Number(process.env.CYCLE_REST_MAX_MS) : undefined,
   // Trend guard: don't open when |mid drift| over the window exceeds the threshold -

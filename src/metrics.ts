@@ -7,10 +7,7 @@ import type { Order } from "./types.js";
 
 const LOG_DIR = fileURLToPath(new URL("../logs/", import.meta.url));
 mkdirSync(LOG_DIR, { recursive: true });
-// Labeled per BOT_LABEL so multiple instances (e.g. one per wallet) running
-// side by side don't interleave into the same file. Default "default" keeps
-// the original unlabeled filename for a single-instance setup.
-const LOG_FILE = `${LOG_DIR}cycles${config.botLabel === "default" ? "" : `.${config.botLabel}`}.jsonl`;
+const LOG_FILE = `${LOG_DIR}cycles.jsonl`;
 
 export type Side = "buy" | "sell";
 
@@ -76,7 +73,7 @@ export interface CycleSummary {
   closeUsedTaker?: boolean;
   closeChaseAttempts?: number; // 0 when closeMakerFirst=false (instant close skips the chase loop entirely)
   // Config snapshot beyond notionalUsd, so A/B runs of ANY knob can be grouped
-  // offline the same way compare-notional groups by notional.
+  // offline by whatever changed.
   closeMakerFirst: boolean;
   maxTakerSlippageBps: number;
   trendGuardMaxDriftBps: number;

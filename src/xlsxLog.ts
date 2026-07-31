@@ -1,20 +1,17 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import ExcelJS from "exceljs";
-import { config } from "./config.js";
 
 const LOG_DIR = fileURLToPath(new URL("../logs/", import.meta.url));
 mkdirSync(LOG_DIR, { recursive: true });
 
-// Labeled per BOT_LABEL, same convention as logs/cycles.jsonl.
-const LABEL_SUFFIX = config.botLabel === "default" ? "" : `.${config.botLabel}`;
 // Ever-growing ledger: every close from every run/restart appends a row here.
-const LIVE_XLSX_FILE = `${LOG_DIR}fees-log${LABEL_SUFFIX}.xlsx`;
+const LIVE_XLSX_FILE = `${LOG_DIR}fees-log.xlsx`;
 // One row per run (keyed by run start time) so runs can be compared side by side.
-const SUMMARY_PER_RUN_FILE = `${LOG_DIR}summary-per-run${LABEL_SUFFIX}.xlsx`;
+const SUMMARY_PER_RUN_FILE = `${LOG_DIR}summary-per-run.xlsx`;
 // One row appended every ~12h of elapsed run time, so progress can be reviewed
 // on a fixed cadence without waiting for a run to end or opening the live ledger.
-const SUMMARY_12H_FILE = `${LOG_DIR}summary-12h${LABEL_SUFFIX}.xlsx`;
+const SUMMARY_12H_FILE = `${LOG_DIR}summary-12h.xlsx`;
 
 // New columns must always be appended at the END of these lists, never inserted
 // in the middle - openOrCreate() only ever re-syncs row 1's labels, it never

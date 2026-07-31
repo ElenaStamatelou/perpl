@@ -1,10 +1,9 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { config } from "./config.js";
 
 const LOG_DIR = fileURLToPath(new URL("../logs/", import.meta.url));
 mkdirSync(LOG_DIR, { recursive: true });
-const EVENTS_FILE = `${LOG_DIR}events${config.botLabel === "default" ? "" : `.${config.botLabel}`}.jsonl`;
+const EVENTS_FILE = `${LOG_DIR}events.jsonl`;
 
 /**
  * One structured line per "interesting" event that today only exists as
