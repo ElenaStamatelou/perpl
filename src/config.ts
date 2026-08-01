@@ -121,4 +121,9 @@ export const config = {
   // Optional: periodic summary push via ntfy.sh (https://ntfy.sh/<topic>, no account
   // needed). Blank = disabled (no-op).
   ntfyTopic: process.env.NTFY_TOPIC?.trim() || "",
+
+  // How often the summary push / xlsx snapshot row fires, in hours. The window is
+  // only checked when a cycle closes, so the actual gap is this rounded up to the
+  // next cycle boundary.
+  summaryIntervalHours: Number(process.env.SUMMARY_INTERVAL_HOURS) || 2,
 };

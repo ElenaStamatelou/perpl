@@ -15,21 +15,33 @@ import { OrderFlags, OrderType, type Account, type Position, type Wallet } from 
 import { logCloseToXlsx, logPeriodSnapshotToXlsx } from "./xlsxLog.js";
 import { sendNtfyMessage } from "./ntfyNotifier.js";
 
-const TWELVE_HOURS_MS = 12 * 60 * 60 * 1000;
+const SUMMARY_INTERVAL_MS = config.summaryIntervalHours * 60 * 60 * 1000;
+
+/** $12,345,678 -> "$12.35M". Volumes run to millions, so raw dollars are unreadable at a glance. */
+function fmtMillions(usd: number): string {
+  return `$${(usd / 1e6).toFixed(2)}M`;
+}
 
 function formatPeriodSummaryMessage(shared: SharedState, periodStartMs: number, periodEndMs: number): string {
   const durationMs = periodEndMs - shared.runStartMs;
   const netCosts = shared.totalFeesUsd - shared.totalPnlUsd;
   const costsPerMillion = shared.totalVolumeUsd > 0 ? (netCosts / shared.totalVolumeUsd) * 1e6 : 0;
   const volumePerHour = durationMs > 0 ? shared.totalVolumeUsd / (durationMs / 3_600_000) : 0;
+  // Volume since the last snapshot, so each push shows the period on its own
+  // rather than only an ever-growing cumulative number.
+  const periodVolume = shared.totalVolumeUsd - shared.periodStartVolumeUsd;
+  const periodHours = (periodEndMs - periodStartMs) / 3_600_000;
+  const periodVolumePerHour = periodHours > 0 ? periodVolume / periodHours : 0;
   return (
     `Period: ${new Date(periodStartMs).toISOString()} -> ${new Date(periodEndMs).toISOString()}\n` +
     `Run duration so far: ${(durationMs / 3_600_000).toFixed(1)}h\n` +
+    `Notional: $${config.notionalUsd}/leg at ${config.leverage}x\n` +
     `Deposit: $${shared.currentBalanceUsd?.toFixed(2) ?? "n/a"}\n` +
-    `Volume: $${shared.totalVolumeUsd.toFixed(2)}\n` +
+    `This period: ${fmtMillions(periodVolume)} vol | ${fmtMillions(periodVolumePerHour)}/h\n` +
+    `Volume: ${fmtMillions(shared.totalVolumeUsd)}\n` +
     `Fees: $${shared.totalFeesUsd.toFixed(2)} | PnL: $${shared.totalPnlUsd.toFixed(2)} | Net cost: $${netCosts.toFixed(2)}\n` +
     `Cost: $${costsPerMillion.toFixed(0)} per $1M volume\n` +
-    `Volume/hour: $${volumePerHour.toFixed(0)}`
+    `Volume/hour: ${fmtMillions(volumePerHour)}`
   );
 }
 
@@ -208,15 +220,25 @@ interface SharedState {
   side: "long" | "short";
   totalVolumeUsd: number;
   totalFeesUsd: number;
-  // Sum of each closed position's realized dpnl (already nets fees AND price
-  // movement/adverse selection) - this is what should reconcile with the
-  // platform's own PNL figure, unlike totalFeesUsd which is fees only.
+  // Sum of each closed position's realized dpnl. This is price movement only -
+  // it does NOT net fees (verified against deposit deltas), which is why the
+  // all-in burn is totalFeesUsd - totalPnlUsd rather than just -totalPnlUsd.
   totalPnlUsd: number;
+  // Dedup guard for the fill stream. Fills are replayed when a new session
+  // subscribes, and `shared` outlives sessions, so without this every reconnect
+  // re-counts the same fills into volume/fees. Measured on a 7-day run: 7,791
+  // ws_closed events inflated reported volume to $26.5M against an exchange
+  // all-time total of $15.4M (~2.8x). Fills carry no id, but `at` is the
+  // on-chain (block, tx, log) coordinate, which is unique per fill.
+  seenFillKeys: Set<string>;
   runStartMs: number;
-  // Start of the current ~12h snapshot window (see TWELVE_HOURS_MS below) -
+  // Start of the current snapshot window (see SUMMARY_INTERVAL_MS below) -
   // survives restarts same as the totals, so a mid-window restart doesn't reset
   // the clock and produce a short extra row.
   periodStartMs: number;
+  // Cumulative volume as of periodStartMs, so a snapshot can report the period's
+  // own volume rather than only the run-long cumulative figure.
+  periodStartVolumeUsd: number;
   stopRequested: boolean;
   // AUSD deposit balance, tracked from wallet/account push updates for the xlsx log.
   // initialBalanceUsd is captured once (first balance seen) and never overwritten.
@@ -309,6 +331,10 @@ async function runSession(shared: SharedState): Promise<void> {
     trading.on("fills", (fills: import("./types.js").Fill[]) => {
       for (const f of fills) {
         if (f.mkt !== market.id) continue;
+        // Skip fills already counted by an earlier session (see seenFillKeys).
+        const key = `${f.at.b}:${f.at.tx}:${f.at.l ?? 0}:${f.oid}`;
+        if (shared.seenFillKeys.has(key)) continue;
+        shared.seenFillKeys.add(key);
         shared.totalVolumeUsd += ((f.p ?? 0) / priceScale) * (f.s / sizeScale);
         shared.totalFeesUsd += Number(f.f) / 1e6; // AUSD, 6 decimals
       }
@@ -486,9 +512,13 @@ async function runSession(shared: SharedState): Promise<void> {
           cumulativeVolumeUsd: shared.totalVolumeUsd,
         });
 
-        if (closedAtMs - shared.periodStartMs >= TWELVE_HOURS_MS) {
+        if (closedAtMs - shared.periodStartMs >= SUMMARY_INTERVAL_MS) {
           const periodStartMs = shared.periodStartMs;
+          // Format before rolling the window forward - the message reports the
+          // period's own volume off periodStartVolumeUsd.
+          const summaryMessage = formatPeriodSummaryMessage(shared, periodStartMs, closedAtMs);
           shared.periodStartMs = closedAtMs;
+          shared.periodStartVolumeUsd = shared.totalVolumeUsd;
           await logPeriodSnapshotToXlsx(
             {
               atMs: closedAtMs,
@@ -502,8 +532,8 @@ async function runSession(shared: SharedState): Promise<void> {
             periodStartMs
           );
           await sendNtfyMessage(
-            "Perpl Bot - 12h summary",
-            formatPeriodSummaryMessage(shared, periodStartMs, closedAtMs)
+            `Perpl Bot - ${config.summaryIntervalHours}h summary`,
+            summaryMessage
           );
         }
       } finally {
@@ -538,8 +568,10 @@ async function main() {
     totalVolumeUsd: 0,
     totalFeesUsd: 0,
     totalPnlUsd: 0,
+    seenFillKeys: new Set(),
     runStartMs: Date.now(),
     periodStartMs: Date.now(),
+    periodStartVolumeUsd: 0,
     stopRequested: false,
   };
 

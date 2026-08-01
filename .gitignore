@@ -1,5 +1,6 @@
 node_modules/
 dist/
+perpl-server-logs/
 .env
 .env.*
 !.env.example
@@ -7,3 +8,4 @@ dist/
 *.log
 logs/
 .DS_Store
+
