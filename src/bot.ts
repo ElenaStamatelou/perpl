@@ -311,6 +311,7 @@ async function runSession(shared: SharedState): Promise<void> {
     await sendNtfyMessage(
       "Perpl Bot - connected",
       `Network: ${config.network} | Market: ${market.symbol} (id ${market.id})\n` +
+        `Notional: $${config.notionalUsd}/leg at ${config.leverage}x\n` +
         `Account: ${trading.getAccountId()}\n` +
         `Chain head block: ${trading.getCurrentBlock()}`
     );
