@@ -122,8 +122,10 @@ export const config = {
   // needed). Blank = disabled (no-op).
   ntfyTopic: process.env.NTFY_TOPIC?.trim() || "",
 
-  // How often the summary push / xlsx snapshot row fires, in hours. The window is
-  // only checked when a cycle closes, so the actual gap is this rounded up to the
-  // next cycle boundary.
+  // Two push cadences, both only checked when a cycle closes (so the real gap
+  // rounds up to the next cycle boundary):
+  //   summary - frequent pulse, ntfy only
+  //   report  - slower full report, ntfy + the xlsx snapshot row
   summaryIntervalHours: Number(process.env.SUMMARY_INTERVAL_HOURS) || 2,
+  reportIntervalHours: Number(process.env.REPORT_INTERVAL_HOURS) || 12,
 };

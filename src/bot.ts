@@ -15,21 +15,29 @@ import { OrderFlags, OrderType, type Account, type Position, type Wallet } from 
 import { logCloseToXlsx, logPeriodSnapshotToXlsx } from "./xlsxLog.js";
 import { sendNtfyMessage } from "./ntfyNotifier.js";
 
+// Two cadences: a frequent pulse (summary) and the slower full report that also
+// writes the xlsx snapshot row.
 const SUMMARY_INTERVAL_MS = config.summaryIntervalHours * 60 * 60 * 1000;
+const REPORT_INTERVAL_MS = config.reportIntervalHours * 60 * 60 * 1000;
 
 /** $12,345,678 -> "$12.35M". Volumes run to millions, so raw dollars are unreadable at a glance. */
 function fmtMillions(usd: number): string {
   return `$${(usd / 1e6).toFixed(2)}M`;
 }
 
-function formatPeriodSummaryMessage(shared: SharedState, periodStartMs: number, periodEndMs: number): string {
+function formatPeriodSummaryMessage(
+  shared: SharedState,
+  periodStartMs: number,
+  periodEndMs: number,
+  periodStartVolumeUsd: number
+): string {
   const durationMs = periodEndMs - shared.runStartMs;
   const netCosts = shared.totalFeesUsd - shared.totalPnlUsd;
   const costsPerMillion = shared.totalVolumeUsd > 0 ? (netCosts / shared.totalVolumeUsd) * 1e6 : 0;
   const volumePerHour = durationMs > 0 ? shared.totalVolumeUsd / (durationMs / 3_600_000) : 0;
   // Volume since the last snapshot, so each push shows the period on its own
   // rather than only an ever-growing cumulative number.
-  const periodVolume = shared.totalVolumeUsd - shared.periodStartVolumeUsd;
+  const periodVolume = shared.totalVolumeUsd - periodStartVolumeUsd;
   const periodHours = (periodEndMs - periodStartMs) / 3_600_000;
   const periodVolumePerHour = periodHours > 0 ? periodVolume / periodHours : 0;
   return (
@@ -232,13 +240,17 @@ interface SharedState {
   // on-chain (block, tx, log) coordinate, which is unique per fill.
   seenFillKeys: Set<string>;
   runStartMs: number;
-  // Start of the current snapshot window (see SUMMARY_INTERVAL_MS below) -
+  // Start of the current summary window (see SUMMARY_INTERVAL_MS below) -
   // survives restarts same as the totals, so a mid-window restart doesn't reset
   // the clock and produce a short extra row.
   periodStartMs: number;
   // Cumulative volume as of periodStartMs, so a snapshot can report the period's
   // own volume rather than only the run-long cumulative figure.
   periodStartVolumeUsd: number;
+  // Same pair for the slower report window (REPORT_INTERVAL_MS), tracked
+  // separately so the two cadences don't reset each other.
+  reportStartMs: number;
+  reportStartVolumeUsd: number;
   stopRequested: boolean;
   // AUSD deposit balance, tracked from wallet/account push updates for the xlsx log.
   // initialBalanceUsd is captured once (first balance seen) and never overwritten.
@@ -512,13 +524,33 @@ async function runSession(shared: SharedState): Promise<void> {
           cumulativeVolumeUsd: shared.totalVolumeUsd,
         });
 
+        // Frequent pulse: ntfy only, no xlsx row (it would bloat the sheet).
         if (closedAtMs - shared.periodStartMs >= SUMMARY_INTERVAL_MS) {
           const periodStartMs = shared.periodStartMs;
           // Format before rolling the window forward - the message reports the
-          // period's own volume off periodStartVolumeUsd.
-          const summaryMessage = formatPeriodSummaryMessage(shared, periodStartMs, closedAtMs);
+          // period's own volume off the window's opening volume.
+          const summaryMessage = formatPeriodSummaryMessage(
+            shared,
+            periodStartMs,
+            closedAtMs,
+            shared.periodStartVolumeUsd
+          );
           shared.periodStartMs = closedAtMs;
           shared.periodStartVolumeUsd = shared.totalVolumeUsd;
+          await sendNtfyMessage(`Perpl Bot - ${config.summaryIntervalHours}h summary`, summaryMessage);
+        }
+
+        // Slower full report: ntfy + the xlsx snapshot row, as before.
+        if (closedAtMs - shared.reportStartMs >= REPORT_INTERVAL_MS) {
+          const reportStartMs = shared.reportStartMs;
+          const reportMessage = formatPeriodSummaryMessage(
+            shared,
+            reportStartMs,
+            closedAtMs,
+            shared.reportStartVolumeUsd
+          );
+          shared.reportStartMs = closedAtMs;
+          shared.reportStartVolumeUsd = shared.totalVolumeUsd;
           await logPeriodSnapshotToXlsx(
             {
               atMs: closedAtMs,
@@ -529,12 +561,9 @@ async function runSession(shared: SharedState): Promise<void> {
               currentBalanceUsd: shared.currentBalanceUsd,
               cumulativeVolumeUsd: shared.totalVolumeUsd,
             },
-            periodStartMs
+            reportStartMs
           );
-          await sendNtfyMessage(
-            `Perpl Bot - ${config.summaryIntervalHours}h summary`,
-            summaryMessage
-          );
+          await sendNtfyMessage(`Perpl Bot - ${config.reportIntervalHours}h report`, reportMessage);
         }
       } finally {
         watchdog.cancel();
@@ -572,6 +601,8 @@ async function main() {
     runStartMs: Date.now(),
     periodStartMs: Date.now(),
     periodStartVolumeUsd: 0,
+    reportStartMs: Date.now(),
+    reportStartVolumeUsd: 0,
     stopRequested: false,
   };
 
