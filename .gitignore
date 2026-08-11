@@ -8,4 +8,5 @@ perpl-server-logs/
 *.log
 logs/
 .DS_Store
+points_calculations.xlsx
 
