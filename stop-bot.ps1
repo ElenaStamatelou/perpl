@@ -15,7 +15,7 @@ if ($procs) {
   Write-Host "No bot processes running for this folder."
 }
 
-Write-Host "Checking for a stranded open position (closing it if found)..."
-npx tsx scripts/close-now.ts
+Write-Host "Cancelling any working orders and closing any stranded position..."
+npx tsx scripts/flatten.ts
 
 Read-Host "Done - press Enter to close this window"

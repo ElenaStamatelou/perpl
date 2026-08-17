@@ -98,13 +98,41 @@ Key `.env` knobs:
 
 Every cycle prints a `[totals]` line with live volume, fees, and $-per-1M burn.
 
+## Scheduled run windows (VPS, UTC)
+
+`scripts/schedule-window.sh` writes two cron entries: one that starts the bot, one
+that stops it. Times are UTC; run it on the Linux VPS (needs GNU `date -d`).
+
+```
+./scripts/schedule-window.sh "2026-08-22 06:00" "2026-08-23 23:59"
+./scripts/schedule-window.sh --show     # what is scheduled
+./scripts/schedule-window.sh --clear    # cancel a pending window
+```
+
+The stop entry runs `scripts/stop-window.sh`, which is a *safe* stop, not just
+`pm2 stop`: it stops the app, waits until the process is genuinely down (the bot
+gets up to `kill_timeout` to finish its in-flight cycle), then runs
+`scripts/flatten.ts` - cancel every working order, close every open position, on
+every market - and re-checks until the account is verified flat, retrying up to 3
+times. It exits non-zero and pushes an ntfy alert if it cannot get to flat, so a
+window never ends with risk left on the exchange. The window's cron entries delete
+themselves after the stop so the window doesn't repeat.
+
 ## Operational notes (learned the hard way)
 
 - **Windows: check for zombie processes before every run** - Ctrl+C doesn't reliably
   kill the npm->tsx tree, and a hidden second instance will trade on your account:
   `Get-Process node` (should error/return nothing), kill anything found.
-- **If the bot stops with a position open**: `npx tsx scripts/close-now.ts` closes it
-  (reduce-only IOC). Check state anytime with `npx tsx scripts/check-live-state.ts`.
+- **If the bot stops with a position open**: `npx tsx scripts/flatten.ts` cancels every
+  working order and closes every open position, on all markets, then re-checks and
+  only exits 0 once the account is verified flat (ntfy alert + exit 1 if not).
+  `scripts/close-now.ts` is the narrower version (position on `MARKET_ID` only).
+  Check state anytime with `npx tsx scripts/check-live-state.ts`.
+- **Never stop the bot with `pm2 stop` alone.** It signals, waits `kill_timeout`, then
+  SIGKILLs - a cycle stuck chasing a maker fill (or a fill landing during the kill) can
+  leave a resting order or an open position behind. Use `./scripts/stop-window.sh`,
+  which does `pm2 stop` -> waits for the process to be really down -> flattens ->
+  verifies. Scheduled windows call it automatically at their stop time.
 - **Audit any run against exchange records** (ground truth, not the bot's own logs):
   `npx tsx scripts/audit-run.ts <runStartEpochMs>` - prints true volume, fees, PnL,
   all-in burn, maker ratio, and volume/hour.

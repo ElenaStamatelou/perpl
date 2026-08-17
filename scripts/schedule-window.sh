@@ -56,14 +56,18 @@ clear_entries
   crontab -l 2>/dev/null || true
   echo "CRON_TZ=UTC $MARKER"
   echo "$START_CRON * cd $REPO_DIR && PATH=$NODE_DIR:\$PATH $PM2 startOrRestart ecosystem.config.cjs >> $CRON_LOG 2>&1 $MARKER"
-  # stop, persist the stopped state so a reboot's `pm2 resurrect` won't relaunch
-  # it, then delete these entries so the window doesn't repeat next year.
-  echo "$STOP_CRON * PATH=$NODE_DIR:\$PATH $PM2 stop perpl-bot >> $CRON_LOG 2>&1; $PM2 save >> $CRON_LOG 2>&1; crontab -l | grep -vF '$MARKER' | crontab - $MARKER"
+  # stop-window.sh does the whole safe stop: pm2 stop, wait for the process to be
+  # really down, cancel every working order, close every open position, verify the
+  # account is flat (ntfy alert if not), and pm2 save so a reboot's `pm2 resurrect`
+  # won't relaunch it. Then delete these entries so the window doesn't repeat next year.
+  echo "$STOP_CRON * cd $REPO_DIR && PATH=$NODE_DIR:\$PATH ./scripts/stop-window.sh >> $CRON_LOG 2>&1; crontab -l | grep -vF '$MARKER' | crontab - $MARKER"
 } | crontab -
+
+chmod +x "$REPO_DIR/scripts/stop-window.sh"
 
 echo "Scheduled (UTC):"
 echo "  start  $(date -u -d "$START_AT" '+%a %Y-%m-%d %H:%M')"
-echo "  stop   $(date -u -d "$STOP_AT"  '+%a %Y-%m-%d %H:%M')"
+echo "  stop   $(date -u -d "$STOP_AT"  '+%a %Y-%m-%d %H:%M')  (stops, then cancels orders + closes positions)"
 echo "  window ${hours}h ${mins}m"
 echo "  dir    $REPO_DIR"
 echo "  log    $CRON_LOG"
