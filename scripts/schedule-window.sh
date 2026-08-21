@@ -2,8 +2,8 @@
 #
 # Schedules a one-off run window for perpl-bot using cron, in UTC.
 #
-#   ./scripts/schedule-window.sh                              # this weekend (Sat 06:00 -> Sun 23:59 UTC)
-#   ./scripts/schedule-window.sh "2026-08-15 06:00" "2026-08-16 23:59"
+#   ./scripts/schedule-window.sh                              # this weekend (Sat 08:00 -> Sun 23:59 UTC)
+#   ./scripts/schedule-window.sh "2026-08-22 08:00" "2026-08-23 23:59"
 #   ./scripts/schedule-window.sh --clear                      # remove a pending schedule
 #   ./scripts/schedule-window.sh --show                       # print current entries
 #
@@ -27,7 +27,7 @@ case "${1:-}" in
   --clear) clear_entries; echo "Cleared."; show; exit 0 ;;
 esac
 
-START_AT="${1:-$(date -u -d 'next Saturday' +%Y-%m-%d) 06:00}"
+START_AT="${1:-$(date -u -d 'next Saturday' +%Y-%m-%d) 08:00}"
 STOP_AT="${2:-$(date -u -d 'next Sunday' +%Y-%m-%d) 23:59}"
 
 # cron has a near-empty PATH and no nvm, so every binary must be absolute and
@@ -38,7 +38,11 @@ NODE="$(command -v node || true)"
 [ -n "$NODE" ] || { echo "node not found in PATH." >&2; exit 1; }
 NODE_DIR="$(dirname "$NODE")"
 
-to_cron() { date -u -d "$1" "+%M %H %d %m"; }   # min hour day month
+# Cron fires on the box's own clock. Rather than rely on `CRON_TZ=UTC` (whose value
+# would swallow the trailing marker comment, silently leaving the entry on local
+# time), resolve the UTC wall-clock time to an epoch and render the cron fields in
+# the box's local zone. Correct whether or not the VPS is set to UTC.
+to_cron() { date -d "@$(date -u -d "$1" +%s)" "+%M %H %d %m"; }   # min hour day month
 START_CRON="$(to_cron "$START_AT")"
 STOP_CRON="$(to_cron "$STOP_AT")"
 
@@ -54,7 +58,6 @@ mins=$(( ((stop_epoch - start_epoch) % 3600) / 60 ))
 clear_entries
 {
   crontab -l 2>/dev/null || true
-  echo "CRON_TZ=UTC $MARKER"
   echo "$START_CRON * cd $REPO_DIR && PATH=$NODE_DIR:\$PATH $PM2 startOrRestart ecosystem.config.cjs >> $CRON_LOG 2>&1 $MARKER"
   # stop-window.sh does the whole safe stop: pm2 stop, wait for the process to be
   # really down, cancel every working order, close every open position, verify the
@@ -65,9 +68,9 @@ clear_entries
 
 chmod +x "$REPO_DIR/scripts/stop-window.sh"
 
-echo "Scheduled (UTC):"
-echo "  start  $(date -u -d "$START_AT" '+%a %Y-%m-%d %H:%M')"
-echo "  stop   $(date -u -d "$STOP_AT"  '+%a %Y-%m-%d %H:%M')  (stops, then cancels orders + closes positions)"
+echo "Scheduled:"
+echo "  start  $(date -u -d "$START_AT" '+%a %Y-%m-%d %H:%M') UTC  =  $(date -d "@$start_epoch" '+%a %Y-%m-%d %H:%M %Z') box time"
+echo "  stop   $(date -u -d "$STOP_AT"  '+%a %Y-%m-%d %H:%M') UTC  =  $(date -d "@$stop_epoch"  '+%a %Y-%m-%d %H:%M %Z') box time  (stops, then cancels orders + closes positions)"
 echo "  window ${hours}h ${mins}m"
 echo "  dir    $REPO_DIR"
 echo "  log    $CRON_LOG"

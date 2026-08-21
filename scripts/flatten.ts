@@ -46,6 +46,11 @@ const overallTimer = setTimeout(async () => {
   await fail("timed out (180s) before the account could be confirmed flat");
 }, OVERALL_TIMEOUT_MS);
 
+// A throw inside a WS event handler would otherwise kill the process silently -
+// for a stop-safety script, dying quietly is the one unacceptable failure mode.
+process.on("uncaughtException", (err) => void fail(`uncaught exception: ${(err as Error).message}`));
+process.on("unhandledRejection", (err) => void fail(`unhandled rejection: ${String(err)}`));
+
 trading.on("error", (err) => console.error("[trading] error:", err));
 trading.once("wallet", (_wallet: Wallet) => {
   // Respects PERPL_ACCOUNT_ID pinning (applied synchronously before this fires).

@@ -22,9 +22,11 @@ echo "=== $(date -u '+%Y-%m-%d %H:%M:%S UTC') stop-window: stopping $APP_NAME ==
 
 # pm2 stop returns as soon as it has signalled; the bot is allowed up to
 # kill_timeout (100s) to finish its cycle. Wait for it to really be down before
-# flattening, so we are not racing the bot's own closing order.
-for _ in $(seq 1 60); do
-  status="$("$PM2" jlist 2>/dev/null | node -e '
+# flattening: two processes on one account share a per-account request-id
+# sequence, so a flatten racing a live bot can corrupt both sides' orders.
+still_up() {
+  pgrep -f "tsx src/bot.ts" >/dev/null 2>&1 && return 0
+  [ "$("$PM2" jlist 2>/dev/null | node -e '
     let s = "";
     process.stdin.on("data", (d) => (s += d));
     process.stdin.on("end", () => {
@@ -32,10 +34,19 @@ for _ in $(seq 1 60); do
         const app = JSON.parse(s).find((a) => a.name === process.argv[1]);
         console.log(app ? app.pm2_env.status : "missing");
       } catch { console.log("unknown"); }
-    });' "$APP_NAME")"
-  [ "$status" = "online" ] || { echo "process status: $status"; break; }
-  sleep 3
+    });' "$APP_NAME")" = "online" ]
+}
+
+waited=0
+while still_up; do
+  if [ "$waited" -ge 180 ]; then
+    echo "WARNING: $APP_NAME still looks alive after 180s - flattening anyway"
+    break
+  fi
+  sleep 5
+  waited=$((waited + 5))
 done
+echo "bot down after ${waited}s"
 
 # Flatten, with retries: an exchange hiccup on the first pass should not be the
 # difference between a flat account and an overnight position.

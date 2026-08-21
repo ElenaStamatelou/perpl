@@ -104,7 +104,7 @@ Every cycle prints a `[totals]` line with live volume, fees, and $-per-1M burn.
 that stops it. Times are UTC; run it on the Linux VPS (needs GNU `date -d`).
 
 ```
-./scripts/schedule-window.sh "2026-08-22 06:00" "2026-08-23 23:59"
+./scripts/schedule-window.sh "2026-08-22 08:00" "2026-08-23 23:59"
 ./scripts/schedule-window.sh --show     # what is scheduled
 ./scripts/schedule-window.sh --clear    # cancel a pending window
 ```
