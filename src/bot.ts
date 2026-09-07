@@ -10,7 +10,7 @@ import {
   openMakerThenTaker,
 } from "./orderEngine.js";
 import { logEvent } from "./eventLog.js";
-import { MetricsTracker, cycleAllInCostUsd, costPerMillionUsd } from "./metrics.js";
+import { MetricsTracker, costPerMillionUsd } from "./metrics.js";
 import { OrderFlags, OrderType, type Account, type Position, type Wallet } from "./types.js";
 import { logCloseToXlsx, logPeriodSnapshotToXlsx } from "./xlsxLog.js";
 import { sendNtfyMessage } from "./ntfyNotifier.js";
@@ -263,7 +263,10 @@ interface SharedState {
   // Ring buffer of the last costLadderCycles cycles, feeding the ladder's cost/$1M.
   // On `shared` for the same reason: a session-scoped history would be empty after
   // every reconnect, and an empty history means the floor (see ladderNotionalUsd).
-  recentCycles: Array<{ costUsd: number; volumeUsd: number }>;
+  // Fee and PnL are kept separate (not pre-collapsed into one cost figure) so the
+  // ntfy pushes below can report the fees/1M + PnL-drag/1M breakdown, not just the
+  // total - costPerMillionUsd derives costUsd = feeUsd - pnlUsd when it needs it.
+  recentCycles: Array<{ feeUsd: number; pnlUsd: number; volumeUsd: number }>;
   // Set once the ladder's cost/$1M goes from "not enough data" to a real number for
   // the first time this process lifetime - gates the one-time ntfy push announcing
   // the starting reading, so it fires once per start/restart, not once per cycle.
@@ -284,6 +287,30 @@ interface SharedState {
  * has to earn its way up to full size once a real window of low-cost cycles backs
  * it, rather than assuming it's safe by default.
  */
+/** Fees/$1M and PnL-drag/$1M (both positive-when-costly) over a set of cycles, for
+ * ntfy messages that need the components, not just the total cost. */
+function windowBreakdown(cycles: ReadonlyArray<{ feeUsd: number; pnlUsd: number; volumeUsd: number }>): {
+  feePerMillion: number;
+  pnlDragPerMillion: number;
+  volumeUsd: number;
+} {
+  let feeUsd = 0;
+  let pnlUsd = 0;
+  let volumeUsd = 0;
+  for (const c of cycles) {
+    feeUsd += c.feeUsd;
+    pnlUsd += c.pnlUsd;
+    volumeUsd += c.volumeUsd;
+  }
+  return {
+    feePerMillion: volumeUsd > 0 ? (feeUsd / volumeUsd) * 1e6 : 0,
+    // Drag is -pnl: a loss (negative pnl) is positive drag, a gain offsets cost -
+    // matches how this is shown everywhere else (watch-cost.ts, the cost writeups).
+    pnlDragPerMillion: volumeUsd > 0 ? (-pnlUsd / volumeUsd) * 1e6 : 0,
+    volumeUsd,
+  };
+}
+
 function ladderNotionalUsd(costPerMillion: number | null, floorUsd: number): number {
   if (costPerMillion == null) return Math.min(floorUsd, config.notionalUsd);
   if (costPerMillion <= config.costLadderTier1UsdPerM) return config.notionalUsd;
@@ -437,7 +464,10 @@ async function runSession(shared: SharedState): Promise<void> {
       const openReferenceMid = fromScaled(openMid, market.config.price_decimals);
 
       if (config.costLadderCycles > 0) {
-        const costPerMillion = costPerMillionUsd(shared.recentCycles, config.costLadderCycles);
+        const costPerMillion = costPerMillionUsd(
+          shared.recentCycles.map((c) => ({ costUsd: c.feeUsd - c.pnlUsd, volumeUsd: c.volumeUsd })),
+          config.costLadderCycles
+        );
         // The bottom rung still has to be an order the exchange will accept:
         // min_posting_amount is the market's own minimum (an Amount, i.e. a decimal
         // string in scaled size units) and is read nowhere else in this codebase, so
@@ -454,11 +484,13 @@ async function runSession(shared: SharedState): Promise<void> {
         // alone - see cycleAllInCostUsd in metrics.ts.
         if (costPerMillion != null && !shared.costLadderFirstReadingSent) {
           shared.costLadderFirstReadingSent = true;
-          const windowVolumeUsd = shared.recentCycles.reduce((sum, c) => sum + c.volumeUsd, 0);
+          const { feePerMillion, pnlDragPerMillion, volumeUsd } = windowBreakdown(shared.recentCycles);
           await sendNtfyMessage(
             "Perpl Bot - first cost reading",
-            `Total cost (fees + PnL drag) over the first ${shared.recentCycles.length} cycles: ` +
-              `$${costPerMillion.toFixed(2)}/1M on $${windowVolumeUsd.toFixed(2)} volume.\n` +
+            `First ${shared.recentCycles.length} cycles ($${volumeUsd.toFixed(2)} volume):\n` +
+              `Fees: $${feePerMillion.toFixed(2)}/1M\n` +
+              `PnL drag: $${pnlDragPerMillion.toFixed(2)}/1M\n` +
+              `Total cost: $${costPerMillion.toFixed(2)}/1M\n` +
               `Notional now $${next.toFixed(2)}/leg.`
           );
         }
@@ -484,9 +516,13 @@ async function runSession(shared: SharedState): Promise<void> {
           // "starting at the floor," so this would just repeat it with a confusing
           // "$400 -> $9" using a shared.currentNotionalUsd that was never traded.
           if (costPerMillion != null) {
+            const { feePerMillion, pnlDragPerMillion } = windowBreakdown(shared.recentCycles);
             await sendNtfyMessage(
               "Perpl Bot - notional changed",
-              `Cost (last ${shared.recentCycles.length} cycles): $${costPerMillion.toFixed(2)}/1M\n` +
+              `Last ${shared.recentCycles.length} cycles:\n` +
+                `Fees: $${feePerMillion.toFixed(2)}/1M\n` +
+                `PnL drag: $${pnlDragPerMillion.toFixed(2)}/1M\n` +
+                `Total cost: $${costPerMillion.toFixed(2)}/1M\n` +
                 `Notional: $${shared.currentNotionalUsd.toFixed(2)} -> $${next.toFixed(2)}`
             );
           }
@@ -603,7 +639,11 @@ async function runSession(shared: SharedState): Promise<void> {
           notionalUsd: shared.currentNotionalUsd,
         });
 
-        shared.recentCycles.push({ costUsd: cycleAllInCostUsd(summary), volumeUsd: summary.volumeUsd });
+        shared.recentCycles.push({
+          feeUsd: (summary.bpsBurned / 10000) * summary.volumeUsd,
+          pnlUsd: summary.pnlUsd ?? 0,
+          volumeUsd: summary.volumeUsd,
+        });
         // Trim to the window. This array outlives sessions, so it must not grow
         // unbounded across a multi-day run.
         const keepCycles = Math.max(config.costLadderCycles, 1);
