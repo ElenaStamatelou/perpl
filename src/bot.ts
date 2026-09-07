@@ -340,12 +340,16 @@ async function runSession(shared: SharedState): Promise<void> {
     // supervisor auto-recovery reconnect) - this is the earliest point that
     // genuinely confirms both WS feeds, auth, and chain sync all worked, not
     // just that the process launched.
+    // Cold start (or any restart) begins at the cost ladder's floor, not
+    // notionalUsd - see ladderNotionalUsd. Say so here rather than claiming the
+    // configured max, which is what will actually happen only once cycles prove
+    // it's cheap.
+    const startingNotionalUsd = config.costLadderCycles > 0 ? config.costLadderNotionalFloor : config.notionalUsd;
     await sendNtfyMessage(
       "Perpl Bot - connected",
-      `Network: ${config.network} | Market: ${market.symbol} (id ${market.id})\n` +
-        `Notional: $${config.notionalUsd}/leg at ${config.leverage}x\n` +
-        `Account: ${trading.getAccountId()}\n` +
-        `Chain head block: ${trading.getCurrentBlock()}`
+      startingNotionalUsd === config.notionalUsd
+        ? `Notional: $${config.notionalUsd}/leg at ${config.leverage}x`
+        : `Notional: starting at $${startingNotionalUsd} (floor), up to $${config.notionalUsd} max, at ${config.leverage}x`
     );
 
     const metrics = new MetricsTracker();
