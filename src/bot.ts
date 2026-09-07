@@ -469,7 +469,9 @@ async function runSession(shared: SharedState): Promise<void> {
               `- notional $${shared.currentNotionalUsd.toFixed(2)} -> $${next.toFixed(2)}`
           );
           // Only on a change - measured on the historical logs that is once per ~8
-          // cycles, where logging every cycle would add ~25k rows per run.
+          // cycles, where logging every cycle would add ~25k rows per run. Same
+          // reasoning for the ntfy push below (asked for explicitly, unlike the
+          // periodic summary/first-reading pushes above - expect it fairly often).
           logEvent("cost_ladder", {
             costPerMillionUsd: costPerMillion,
             cycles: shared.recentCycles.length,
@@ -477,6 +479,17 @@ async function runSession(shared: SharedState): Promise<void> {
             toNotionalUsd: next,
             floorUsd,
           });
+          // Skip the push (not the log/event above) for the very first, data-less
+          // assignment at session start - the "connected" message already announced
+          // "starting at the floor," so this would just repeat it with a confusing
+          // "$400 -> $9" using a shared.currentNotionalUsd that was never traded.
+          if (costPerMillion != null) {
+            await sendNtfyMessage(
+              "Perpl Bot - notional changed",
+              `Cost (last ${shared.recentCycles.length} cycles): $${costPerMillion.toFixed(2)}/1M\n` +
+                `Notional: $${shared.currentNotionalUsd.toFixed(2)} -> $${next.toFixed(2)}`
+            );
+          }
           shared.currentNotionalUsd = next;
         }
       }
