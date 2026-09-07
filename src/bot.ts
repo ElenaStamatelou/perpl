@@ -43,7 +43,11 @@ function formatPeriodSummaryMessage(
   return (
     `Period: ${new Date(periodStartMs).toISOString()} -> ${new Date(periodEndMs).toISOString()}\n` +
     `Run duration so far: ${(durationMs / 3_600_000).toFixed(1)}h\n` +
-    `Notional: $${config.notionalUsd}/leg at ${config.leverage}x\n` +
+    // The cost ladder varies size at runtime (see ladderNotionalUsd) - reporting
+    // config.notionalUsd here would show the configured max, not what's actually
+    // trading right now, which is exactly what a "why is cost what it is" push
+    // needs to show.
+    `Notional: $${shared.currentNotionalUsd.toFixed(2)}/leg (max $${config.notionalUsd}) at ${config.leverage}x\n` +
     `Deposit: $${shared.currentBalanceUsd?.toFixed(2) ?? "n/a"}\n` +
     `This period: ${fmtMillions(periodVolume)} vol | ${fmtMillions(periodVolumePerHour)}/h\n` +
     `Volume: ${fmtMillions(shared.totalVolumeUsd)}\n` +
