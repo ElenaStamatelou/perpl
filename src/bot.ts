@@ -264,6 +264,10 @@ interface SharedState {
   // On `shared` for the same reason: a session-scoped history would be empty after
   // every reconnect, and an empty history means the floor (see ladderNotionalUsd).
   recentCycles: Array<{ costUsd: number; volumeUsd: number }>;
+  // Set once the ladder's cost/$1M goes from "not enough data" to a real number for
+  // the first time this process lifetime - gates the one-time ntfy push announcing
+  // the starting reading, so it fires once per start/restart, not once per cycle.
+  costLadderFirstReadingSent: boolean;
   // AUSD deposit balance, tracked from wallet/account push updates for the xlsx log.
   // initialBalanceUsd is captured once (first balance seen) and never overwritten.
   initialBalanceUsd?: number;
@@ -443,6 +447,22 @@ async function runSession(shared: SharedState): Promise<void> {
         const minPostingUsd = fromScaled(minPostingSize, market.config.size_decimals) * openReferenceMid;
         const floorUsd = Math.max(config.costLadderNotionalFloor, minPostingUsd);
         const next = ladderNotionalUsd(costPerMillion, floorUsd);
+
+        // One-time push the moment there's enough data to judge cost at all - "where
+        // we start" for this run, independent of whether that reading actually moves
+        // the rung. costPerMillion is already the total (fees + PnL drag), never fees
+        // alone - see cycleAllInCostUsd in metrics.ts.
+        if (costPerMillion != null && !shared.costLadderFirstReadingSent) {
+          shared.costLadderFirstReadingSent = true;
+          const windowVolumeUsd = shared.recentCycles.reduce((sum, c) => sum + c.volumeUsd, 0);
+          await sendNtfyMessage(
+            "Perpl Bot - first cost reading",
+            `Total cost (fees + PnL drag) over the first ${shared.recentCycles.length} cycles: ` +
+              `$${costPerMillion.toFixed(2)}/1M on $${windowVolumeUsd.toFixed(2)} volume.\n` +
+              `Notional now $${next.toFixed(2)}/leg.`
+          );
+        }
+
         if (next !== shared.currentNotionalUsd) {
           console.log(
             `[cost-ladder] $${costPerMillion?.toFixed(1) ?? "n/a"}/1M over last ${shared.recentCycles.length} cycles ` +
@@ -681,6 +701,7 @@ async function main() {
     stopRequested: false,
     currentNotionalUsd: config.notionalUsd,
     recentCycles: [],
+    costLadderFirstReadingSent: false,
   };
 
   // SIGINT (Ctrl+C in a foreground terminal) and SIGTERM (pm2 stop, plain `kill`,
