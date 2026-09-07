@@ -96,9 +96,11 @@ export function cycleAllInCostUsd(cycle: Pick<CycleSummary, "bpsBurned" | "volum
 
 /**
  * All-in cost per $1M of volume over the given cycles, or null when there are
- * fewer than minCycles to judge from (callers must treat null as "unknown", never
- * as "expensive"). Being a ratio, it reads correctly at any notional - which is
- * what lets the cost ladder measure its way back up from the floor.
+ * fewer than minCycles to judge from - genuinely "unknown," not a cost value, so
+ * how to act on it (trade full size vs. stay cautious) is a policy decision for
+ * the caller, not this function. Being a ratio, it reads correctly at any
+ * notional - which is what lets the cost ladder measure its way back up from
+ * the floor once real data backs it.
  */
 export function costPerMillionUsd(
   cycles: ReadonlyArray<{ costUsd: number; volumeUsd: number }>,

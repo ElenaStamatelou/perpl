@@ -14,8 +14,11 @@ import { cycleAllInCostUsd, costPerMillionUsd } from "../src/metrics.js";
 import type { CycleSummary } from "../src/metrics.js";
 
 // Mirrors ladderNotionalUsd() in bot.ts, which can't be imported (bot.ts self-runs).
+// A null reading (cold start / post-restart, no evidence yet) maps to the floor,
+// not full - size has to earn its way up once real data backs it.
 function ladder(costPerMillion: number | null, floorUsd: number): number {
-  if (costPerMillion == null || costPerMillion <= config.costLadderTier1UsdPerM) return config.notionalUsd;
+  if (costPerMillion == null) return Math.min(floorUsd, config.notionalUsd);
+  if (costPerMillion <= config.costLadderTier1UsdPerM) return config.notionalUsd;
   if (costPerMillion <= config.costLadderTier2UsdPerM) return Math.min(config.costLadderNotionalMid, config.notionalUsd);
   return Math.min(floorUsd, config.notionalUsd);
 }

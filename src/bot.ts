@@ -258,7 +258,7 @@ interface SharedState {
   currentNotionalUsd: number;
   // Ring buffer of the last costLadderCycles cycles, feeding the ladder's cost/$1M.
   // On `shared` for the same reason: a session-scoped history would be empty after
-  // every reconnect, and an empty history means full size.
+  // every reconnect, and an empty history means the floor (see ladderNotionalUsd).
   recentCycles: Array<{ costUsd: number; volumeUsd: number }>;
   // AUSD deposit balance, tracked from wallet/account push updates for the xlsx log.
   // initialBalanceUsd is captured once (first balance seen) and never overwritten.
@@ -268,12 +268,17 @@ interface SharedState {
 
 /**
  * Notional for the next open, from the all-in cost per $1M of recent cycles.
- * Cheap conditions get full size, expensive conditions progressively less. A null
- * reading means "not enough cycles to judge yet" and must map to full size - a
- * cold start trades normally rather than crawling at the floor.
+ * Cheap conditions get full size, expensive conditions progressively less.
+ *
+ * A null reading ("not enough cycles to judge yet") maps to the FLOOR, not full -
+ * every cold start and every session restart (172 of them across 3 weeks of
+ * history) starts with zero evidence conditions are cheap, so it starts small and
+ * has to earn its way up to full size once a real window of low-cost cycles backs
+ * it, rather than assuming it's safe by default.
  */
 function ladderNotionalUsd(costPerMillion: number | null, floorUsd: number): number {
-  if (costPerMillion == null || costPerMillion <= config.costLadderTier1UsdPerM) return config.notionalUsd;
+  if (costPerMillion == null) return Math.min(floorUsd, config.notionalUsd);
+  if (costPerMillion <= config.costLadderTier1UsdPerM) return config.notionalUsd;
   // Every rung is clamped to notionalUsd so the ladder can only ever reduce size.
   if (costPerMillion <= config.costLadderTier2UsdPerM) {
     return Math.min(config.costLadderNotionalMid, config.notionalUsd);
