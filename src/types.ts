@@ -223,6 +223,7 @@ export const ORDER_REASON_TEXT: Record<number, string> = {
   [OrderStatusReason.OrderDescIdTooLow]: "request id conflict",
   [OrderStatusReason.OrderForwardingNotAllowed]: "forwarding not allowed (enable 1-click trading)",
   [OrderStatusReason.PriceOutOfRange]: "price out of range",
+  [OrderStatusReason.ImmediateOrderUnderMinimum]: "order below the market minimum size",
 };
 
 /** Order state as reported by REST history / WS snapshots+updates. */

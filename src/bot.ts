@@ -10,7 +10,7 @@ import {
   openMakerThenTaker,
 } from "./orderEngine.js";
 import { logEvent } from "./eventLog.js";
-import { MetricsTracker } from "./metrics.js";
+import { MetricsTracker, cycleAllInCostUsd, costPerMillionUsd } from "./metrics.js";
 import { OrderFlags, OrderType, type Account, type Position, type Wallet } from "./types.js";
 import { logCloseToXlsx, logPeriodSnapshotToXlsx } from "./xlsxLog.js";
 import { sendNtfyMessage } from "./ntfyNotifier.js";
@@ -252,10 +252,33 @@ interface SharedState {
   reportStartMs: number;
   reportStartVolumeUsd: number;
   stopRequested: boolean;
+  // Notional the cost ladder has chosen for the next open. Lives here rather than
+  // on the session (or as a config mutation) so a session restart doesn't silently
+  // snap size back to full - sessions died 172 times across the 3 weeks of logs.
+  currentNotionalUsd: number;
+  // Ring buffer of the last costLadderCycles cycles, feeding the ladder's cost/$1M.
+  // On `shared` for the same reason: a session-scoped history would be empty after
+  // every reconnect, and an empty history means full size.
+  recentCycles: Array<{ costUsd: number; volumeUsd: number }>;
   // AUSD deposit balance, tracked from wallet/account push updates for the xlsx log.
   // initialBalanceUsd is captured once (first balance seen) and never overwritten.
   initialBalanceUsd?: number;
   currentBalanceUsd?: number;
+}
+
+/**
+ * Notional for the next open, from the all-in cost per $1M of recent cycles.
+ * Cheap conditions get full size, expensive conditions progressively less. A null
+ * reading means "not enough cycles to judge yet" and must map to full size - a
+ * cold start trades normally rather than crawling at the floor.
+ */
+function ladderNotionalUsd(costPerMillion: number | null, floorUsd: number): number {
+  if (costPerMillion == null || costPerMillion <= config.costLadderTier1UsdPerM) return config.notionalUsd;
+  // Every rung is clamped to notionalUsd so the ladder can only ever reduce size.
+  if (costPerMillion <= config.costLadderTier2UsdPerM) {
+    return Math.min(config.costLadderNotionalMid, config.notionalUsd);
+  }
+  return Math.min(floorUsd, config.notionalUsd);
 }
 
 /**
@@ -396,14 +419,43 @@ async function runSession(shared: SharedState): Promise<void> {
       }
       const openReferenceMid = fromScaled(openMid, market.config.price_decimals);
 
-      console.log(`[cycle ${cycleId}] opening ${side} ~$${config.notionalUsd} @ ${config.leverage}x`);
+      if (config.costLadderCycles > 0) {
+        const costPerMillion = costPerMillionUsd(shared.recentCycles, config.costLadderCycles);
+        // The bottom rung still has to be an order the exchange will accept:
+        // min_posting_amount is the market's own minimum (an Amount, i.e. a decimal
+        // string in scaled size units) and is read nowhere else in this codebase, so
+        // without this a floor beneath it would make every open unfillable. Falls back
+        // to 0 when the market omits it, leaving the configured floor to stand.
+        const minPostingSize = Number(market.config.min_posting_amount ?? 0) || 0;
+        const minPostingUsd = fromScaled(minPostingSize, market.config.size_decimals) * openReferenceMid;
+        const floorUsd = Math.max(config.costLadderNotionalFloor, minPostingUsd);
+        const next = ladderNotionalUsd(costPerMillion, floorUsd);
+        if (next !== shared.currentNotionalUsd) {
+          console.log(
+            `[cost-ladder] $${costPerMillion?.toFixed(1) ?? "n/a"}/1M over last ${shared.recentCycles.length} cycles ` +
+              `- notional $${shared.currentNotionalUsd.toFixed(2)} -> $${next.toFixed(2)}`
+          );
+          // Only on a change - measured on the historical logs that is once per ~8
+          // cycles, where logging every cycle would add ~25k rows per run.
+          logEvent("cost_ladder", {
+            costPerMillionUsd: costPerMillion,
+            cycles: shared.recentCycles.length,
+            fromNotionalUsd: shared.currentNotionalUsd,
+            toNotionalUsd: next,
+            floorUsd,
+          });
+          shared.currentNotionalUsd = next;
+        }
+      }
+
+      console.log(`[cycle ${cycleId}] opening ${side} ~$${shared.currentNotionalUsd.toFixed(2)} @ ${config.leverage}x`);
       let openedAtMs = Date.now();
       const openTrace = await openMakerThenTaker({
         trading,
         marketData,
         market,
         side,
-        notionalUsd: config.notionalUsd,
+        notionalUsd: shared.currentNotionalUsd,
       });
 
       let position;
@@ -421,7 +473,7 @@ async function runSession(shared: SharedState): Promise<void> {
           logEvent("cycle_skipped", {
             cycleId,
             side,
-            notionalUsd: config.notionalUsd,
+            notionalUsd: shared.currentNotionalUsd,
             chaseAttempts: openTrace.chaseAttempts,
             flippedTo: side === "long" ? "short" : "long",
           });
@@ -502,7 +554,16 @@ async function runSession(shared: SharedState): Promise<void> {
           openedAtMs,
           closedAtMs,
           pnlUsd,
+          notionalUsd: shared.currentNotionalUsd,
         });
+
+        shared.recentCycles.push({ costUsd: cycleAllInCostUsd(summary), volumeUsd: summary.volumeUsd });
+        // Trim to the window. This array outlives sessions, so it must not grow
+        // unbounded across a multi-day run.
+        const keepCycles = Math.max(config.costLadderCycles, 1);
+        if (shared.recentCycles.length > keepCycles) {
+          shared.recentCycles.splice(0, shared.recentCycles.length - keepCycles);
+        }
         console.log(
           `[cycle ${cycleId}] done: PnL ${pnlUsd < 0 ? "-" : "+"}$${Math.abs(pnlUsd).toFixed(2)}, ` +
             `held ${((summary.holdTimeMs ?? 0) / 1000).toFixed(1)}s ` +
@@ -605,6 +666,8 @@ async function main() {
     reportStartMs: Date.now(),
     reportStartVolumeUsd: 0,
     stopRequested: false,
+    currentNotionalUsd: config.notionalUsd,
+    recentCycles: [],
   };
 
   // SIGINT (Ctrl+C in a foreground terminal) and SIGTERM (pm2 stop, plain `kill`,

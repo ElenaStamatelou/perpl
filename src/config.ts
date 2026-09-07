@@ -118,6 +118,26 @@ export const config = {
   chaseAbortDriftBps: Number(process.env.CHASE_ABORT_DRIFT_BPS ?? 3.5),
   chaseAbortConfirmAttempts: Number(process.env.CHASE_ABORT_CONFIRM_ATTEMPTS) || 2,
 
+  // Cost ladder: scale notional down as recent all-in cost per $1M rises, and back
+  // up as it falls, so volume is weighted toward cheap conditions. Rungs are
+  // <= tier1 -> notionalUsd (full), tier1..tier2 -> mid, > tier2 -> floor.
+  //
+  // The window is a cycle COUNT, not wall-clock: at the observed ~68 cycles/hr, 12
+  // cycles is ~10 minutes, but a time window empties out whenever the bot is
+  // skipping cycles - measured on the historical logs it had too few samples to
+  // judge for 27% of cycles, and so fell back to full size exactly when the market
+  // was trending and expensive. A cycle count can never go blind that way.
+  //
+  // The floor deliberately keeps trading rather than stopping: the metric is a
+  // ratio, so it stays valid at floor size, and a bot that stopped would freeze its
+  // own input and never learn that conditions had improved.
+  // Set costLadderCycles to 0 to disable (notional stays at notionalUsd).
+  costLadderCycles: Number(process.env.COST_LADDER_CYCLES ?? 12),
+  costLadderTier1UsdPerM: Number(process.env.COST_LADDER_TIER1_USD_PER_M ?? 60),
+  costLadderTier2UsdPerM: Number(process.env.COST_LADDER_TIER2_USD_PER_M ?? 70),
+  costLadderNotionalMid: Number(process.env.COST_LADDER_NOTIONAL_MID ?? 200),
+  costLadderNotionalFloor: Number(process.env.COST_LADDER_NOTIONAL_FLOOR ?? 9),
+
   // Optional: periodic summary push via ntfy.sh (https://ntfy.sh/<topic>, no account
   // needed). Blank = disabled (no-op).
   ntfyTopic: process.env.NTFY_TOPIC?.trim() || "",

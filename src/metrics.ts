@@ -47,6 +47,10 @@ export interface CycleInput {
   openedAtMs?: number;
   closedAtMs?: number;
   pnlUsd?: number; // realized dpnl from the exchange (excludes fees - verified against deposit deltas)
+  // Notional actually used for this cycle. Not config.notionalUsd: the cost ladder
+  // varies size at runtime, so reading the config here would record a size that was
+  // never traded and make cycles.jsonl useless for auditing the ladder offline.
+  notionalUsd: number;
 }
 
 export interface CycleSummary {
@@ -79,6 +83,36 @@ export interface CycleSummary {
   trendGuardMaxDriftBps: number;
   chaseAbortDriftBps: number;
   makerChaseAttempts: number;
+}
+
+/**
+ * All-in cost of one cycle in USD: fees paid, minus realized PnL. Same definition
+ * as scripts/audit-run.ts (fees - PnL), so the in-process number and the offline
+ * exchange audit are directly comparable.
+ */
+export function cycleAllInCostUsd(cycle: Pick<CycleSummary, "bpsBurned" | "volumeUsd" | "pnlUsd">): number {
+  return (cycle.bpsBurned / 10000) * cycle.volumeUsd - (cycle.pnlUsd ?? 0);
+}
+
+/**
+ * All-in cost per $1M of volume over the given cycles, or null when there are
+ * fewer than minCycles to judge from (callers must treat null as "unknown", never
+ * as "expensive"). Being a ratio, it reads correctly at any notional - which is
+ * what lets the cost ladder measure its way back up from the floor.
+ */
+export function costPerMillionUsd(
+  cycles: ReadonlyArray<{ costUsd: number; volumeUsd: number }>,
+  minCycles: number
+): number | null {
+  if (cycles.length < minCycles) return null;
+  let costUsd = 0;
+  let volumeUsd = 0;
+  for (const c of cycles) {
+    costUsd += c.costUsd;
+    volumeUsd += c.volumeUsd;
+  }
+  if (volumeUsd <= 0) return null;
+  return (costUsd / volumeUsd) * 1e6;
 }
 
 export class MetricsTracker {
@@ -135,7 +169,7 @@ export class MetricsTracker {
       cycleId: input.cycleId,
       marketId: input.marketId,
       side: input.side,
-      notionalUsd: config.notionalUsd,
+      notionalUsd: input.notionalUsd,
       openChaseAttempts: openTrace.chaseAttempts,
       volumeUsd,
       bpsBurned,

@@ -437,6 +437,19 @@ export async function openMakerThenTaker(params: OpenParams): Promise<ExecutionT
   const initialPriceScaled = isLong ? bestBid : bestAsk;
   const initialPrice = fromScaled(initialPriceScaled, price_decimals);
   const requestedSize = toScaled(notionalUsd / initialPrice, size_decimals);
+  // A notional too small for the market's size granularity rounds to 0, and a
+  // zero/sub-minimum order is rejected on every chase attempt - which the retry
+  // loop treats as ordinary churn, so the bot would spin forever placing orders
+  // that can never fill (no throw, no exit, just cycle_skipped in a loop). The
+  // cost ladder in bot.ts clamps its floor above min_posting_amount, so reaching
+  // this means a misconfiguration; fail loudly rather than silently no-op.
+  const minPostingSize = Number(market.config.min_posting_amount ?? 0) || 0;
+  if (requestedSize <= 0 || requestedSize < minPostingSize) {
+    throw new Error(
+      `notional $${notionalUsd} is too small for market ${market.id}: scaled size ${requestedSize} ` +
+        `(price ${initialPrice}, size_decimals ${size_decimals}) is below min_posting_amount ${minPostingSize}`
+    );
+  }
   const t = isLong ? OrderType.OpenLong : OrderType.OpenShort;
 
   return chaseThenMaybeTaker({
