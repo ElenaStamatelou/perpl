@@ -3,6 +3,11 @@
 import { TradingClient } from "../src/tradingClient.js";
 import type { Position, Wallet } from "../src/types.js";
 
+// See check-connection.ts: balance/locked are Amounts (decimal strings scaled 1e6),
+// not raw dollars - printing them unscaled understated the real balance by 1e6x.
+const usd = (a: unknown) => Number(a ?? 0) / 1e6;
+const money = (n: number) => `$${n.toFixed(2)}`;
+
 const trading = new TradingClient();
 const timeout = setTimeout(() => {
   console.error("Timed out waiting for snapshots");
@@ -23,7 +28,7 @@ function maybeExit() {
 trading.once("wallet", (wallet: Wallet) => {
   gotWallet = true;
   for (const acc of wallet.as ?? []) {
-    console.log(`Account ${acc.id}: balance=${acc.b} locked=${acc.lb} frozen=${acc.fr}`);
+    console.log(`Account ${acc.id}: balance=${money(usd(acc.b))} locked=${money(usd(acc.lb))} frozen=${acc.fr}`);
   }
   maybeExit();
 });
