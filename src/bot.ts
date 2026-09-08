@@ -259,7 +259,13 @@ interface SharedState {
   // Notional the cost ladder has chosen for the next open. Lives here rather than
   // on the session (or as a config mutation) so a session restart doesn't silently
   // snap size back to full - sessions died 172 times across the 3 weeks of logs.
+  // Updated every cycle now (the ladder is a continuous line, not fixed rungs).
   currentNotionalUsd: number;
+  // The notional value as of the last time a change was actually logged/notified.
+  // Separate from currentNotionalUsd (which moves every cycle) so logging/alerting
+  // can be throttled to "moved at least costLadderNotifyStepUsd" without that
+  // throttling affecting what's actually traded.
+  lastNotifiedNotionalUsd: number;
   // Ring buffer of the last costLadderCycles cycles, feeding the ladder's cost/$1M.
   // On `shared` for the same reason: a session-scoped history would be empty after
   // every reconnect, and an empty history means the floor (see ladderNotionalUsd).
@@ -311,14 +317,22 @@ function windowBreakdown(cycles: ReadonlyArray<{ feeUsd: number; pnlUsd: number;
   };
 }
 
+/**
+ * Linearly interpolates between notionalUsd (full, at cost <= tier1) and floorUsd
+ * (at cost >= tier2) - a continuous scale rather than discrete rungs, so a small
+ * move in cost produces a small move in size instead of a jump between fixed
+ * steps. tier1/tier2 are the same two thresholds as before; there's no longer a
+ * separate "mid" size - it falls wherever it falls on the line between the two.
+ */
 function ladderNotionalUsd(costPerMillion: number | null, floorUsd: number): number {
-  if (costPerMillion == null) return Math.min(floorUsd, config.notionalUsd);
-  if (costPerMillion <= config.costLadderTier1UsdPerM) return config.notionalUsd;
-  // Every rung is clamped to notionalUsd so the ladder can only ever reduce size.
-  if (costPerMillion <= config.costLadderTier2UsdPerM) {
-    return Math.min(config.costLadderNotionalMid, config.notionalUsd);
-  }
-  return Math.min(floorUsd, config.notionalUsd);
+  const full = config.notionalUsd;
+  const floor = Math.min(floorUsd, full); // clamp: the floor can never exceed full
+  if (costPerMillion == null) return floor;
+  const { costLadderTier1UsdPerM: lo, costLadderTier2UsdPerM: hi } = config;
+  if (costPerMillion <= lo) return full;
+  if (costPerMillion >= hi) return floor;
+  const frac = hi > lo ? (costPerMillion - lo) / (hi - lo) : 1; // 0 at lo, 1 at hi
+  return full + (floor - full) * frac;
 }
 
 /**
@@ -477,10 +491,14 @@ async function runSession(shared: SharedState): Promise<void> {
         const minPostingUsd = fromScaled(minPostingSize, market.config.size_decimals) * openReferenceMid;
         const floorUsd = Math.max(config.costLadderNotionalFloor, minPostingUsd);
         const next = ladderNotionalUsd(costPerMillion, floorUsd);
+        // The traded size updates every cycle now - the scale is continuous, so
+        // there's no "rung" to wait for. Logging/alerting is throttled separately
+        // below; this line is unconditional.
+        shared.currentNotionalUsd = next;
 
         // One-time push the moment there's enough data to judge cost at all - "where
         // we start" for this run, independent of whether that reading actually moves
-        // the rung. costPerMillion is already the total (fees + PnL drag), never fees
+        // size. costPerMillion is already the total (fees + PnL drag), never fees
         // alone - see cycleAllInCostUsd in metrics.ts.
         if (costPerMillion != null && !shared.costLadderFirstReadingSent) {
           shared.costLadderFirstReadingSent = true;
@@ -495,26 +513,28 @@ async function runSession(shared: SharedState): Promise<void> {
           );
         }
 
-        if (next !== shared.currentNotionalUsd) {
+        // Log/notify only once size has drifted at least costLadderNotifyStepUsd from
+        // the last announced value - on a continuous scale, comparing to the PRIOR
+        // cycle's value would fire almost every cycle (each one differs slightly as
+        // the rolling window shifts), which is what the old exact-inequality check
+        // effectively degenerated into once rungs became a smooth line.
+        if (Math.abs(next - shared.lastNotifiedNotionalUsd) >= config.costLadderNotifyStepUsd) {
+          const from = shared.lastNotifiedNotionalUsd;
           console.log(
             `[cost-ladder] $${costPerMillion?.toFixed(1) ?? "n/a"}/1M over last ${shared.recentCycles.length} cycles ` +
-              `- notional $${shared.currentNotionalUsd.toFixed(2)} -> $${next.toFixed(2)}`
+              `- notional $${from.toFixed(2)} -> $${next.toFixed(2)}`
           );
-          // Only on a change - measured on the historical logs that is once per ~8
-          // cycles, where logging every cycle would add ~25k rows per run. Same
-          // reasoning for the ntfy push below (asked for explicitly, unlike the
-          // periodic summary/first-reading pushes above - expect it fairly often).
           logEvent("cost_ladder", {
             costPerMillionUsd: costPerMillion,
             cycles: shared.recentCycles.length,
-            fromNotionalUsd: shared.currentNotionalUsd,
+            fromNotionalUsd: from,
             toNotionalUsd: next,
             floorUsd,
           });
           // Skip the push (not the log/event above) for the very first, data-less
           // assignment at session start - the "connected" message already announced
           // "starting at the floor," so this would just repeat it with a confusing
-          // "$400 -> $9" using a shared.currentNotionalUsd that was never traded.
+          // "$400 -> $3" using a notional that was never actually traded.
           if (costPerMillion != null) {
             const { feePerMillion, pnlDragPerMillion } = windowBreakdown(shared.recentCycles);
             await sendNtfyMessage(
@@ -523,10 +543,10 @@ async function runSession(shared: SharedState): Promise<void> {
                 `Fees: $${feePerMillion.toFixed(2)}/1M\n` +
                 `PnL drag: $${pnlDragPerMillion.toFixed(2)}/1M\n` +
                 `Total cost: $${costPerMillion.toFixed(2)}/1M\n` +
-                `Notional: $${shared.currentNotionalUsd.toFixed(2)} -> $${next.toFixed(2)}`
+                `Notional: $${from.toFixed(2)} -> $${next.toFixed(2)}`
             );
           }
-          shared.currentNotionalUsd = next;
+          shared.lastNotifiedNotionalUsd = next;
         }
       }
 
@@ -753,6 +773,7 @@ async function main() {
     reportStartVolumeUsd: 0,
     stopRequested: false,
     currentNotionalUsd: config.notionalUsd,
+    lastNotifiedNotionalUsd: config.notionalUsd,
     recentCycles: [],
     costLadderFirstReadingSent: false,
   };

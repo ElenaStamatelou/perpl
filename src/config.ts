@@ -119,24 +119,37 @@ export const config = {
   chaseAbortConfirmAttempts: Number(process.env.CHASE_ABORT_CONFIRM_ATTEMPTS) || 2,
 
   // Cost ladder: scale notional down as recent all-in cost per $1M rises, and back
-  // up as it falls, so volume is weighted toward cheap conditions. Rungs are
-  // <= tier1 -> notionalUsd (full), tier1..tier2 -> mid, > tier2 -> floor.
+  // up as it falls, so volume is weighted toward cheap conditions. Linear, not
+  // stepped: <= tier1 -> notionalUsd (full), >= tier2 -> floor, and a straight
+  // line between the two in between - see ladderNotionalUsd. No separate "mid"
+  // size; that was the original design (2026-09-07) but was replaced with a
+  // continuous scale (2026-09-08) so a small cost move produces a small size
+  // move instead of jumping between fixed steps.
   //
-  // The window is a cycle COUNT, not wall-clock: at the observed ~68 cycles/hr, 12
-  // cycles is ~10 minutes, but a time window empties out whenever the bot is
-  // skipping cycles - measured on the historical logs it had too few samples to
-  // judge for 27% of cycles, and so fell back to full size exactly when the market
-  // was trending and expensive. A cycle count can never go blind that way.
+  // The window is a cycle COUNT, not wall-clock: at the observed ~68 cycles/hr, a
+  // time window empties out whenever the bot is skipping cycles - measured on the
+  // historical logs it had too few samples to judge for 27% of cycles, and so fell
+  // back to full size exactly when the market was trending and expensive. A cycle
+  // count can never go blind that way.
   //
   // The floor deliberately keeps trading rather than stopping: the metric is a
   // ratio, so it stays valid at floor size, and a bot that stopped would freeze its
   // own input and never learn that conditions had improved.
   // Set costLadderCycles to 0 to disable (notional stays at notionalUsd).
-  costLadderCycles: Number(process.env.COST_LADDER_CYCLES ?? 12),
+  // Fallbacks kept in sync with .env.example's documented defaults, not the
+  // original launch values - see .env.example for the tuning history.
+  costLadderCycles: Number(process.env.COST_LADDER_CYCLES ?? 70),
   costLadderTier1UsdPerM: Number(process.env.COST_LADDER_TIER1_USD_PER_M ?? 60),
   costLadderTier2UsdPerM: Number(process.env.COST_LADDER_TIER2_USD_PER_M ?? 70),
-  costLadderNotionalMid: Number(process.env.COST_LADDER_NOTIONAL_MID ?? 200),
-  costLadderNotionalFloor: Number(process.env.COST_LADDER_NOTIONAL_FLOOR ?? 9),
+  costLadderNotionalFloor: Number(process.env.COST_LADDER_NOTIONAL_FLOOR ?? 3),
+  // The traded size now updates every cycle (continuous), but logging/alerting on
+  // every tiny wiggle would be noise - only log/notify once it has moved at least
+  // this many dollars from the last announced value, in either direction. $75
+  // reproduces roughly the same notify cadence as the old discrete rungs (~1 per
+  // 29 cycles, per scripts/replay-ladder.ts) - $20 was tried first and notified
+  // ~3x more often, since a continuous scale drifts a little every cycle while
+  // transiting the tier1-tier2 band rather than sitting on a flat plateau.
+  costLadderNotifyStepUsd: Number(process.env.COST_LADDER_NOTIFY_STEP_USD ?? 75),
 
   // Optional: periodic summary push via ntfy.sh (https://ntfy.sh/<topic>, no account
   // needed). Blank = disabled (no-op).

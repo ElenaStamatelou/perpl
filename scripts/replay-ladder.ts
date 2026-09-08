@@ -14,13 +14,18 @@ import { cycleAllInCostUsd, costPerMillionUsd } from "../src/metrics.js";
 import type { CycleSummary } from "../src/metrics.js";
 
 // Mirrors ladderNotionalUsd() in bot.ts, which can't be imported (bot.ts self-runs).
-// A null reading (cold start / post-restart, no evidence yet) maps to the floor,
-// not full - size has to earn its way up once real data backs it.
+// Continuous, not stepped: a straight line between full (at tier1) and floor (at
+// tier2). A null reading (cold start / post-restart, no evidence yet) maps to the
+// floor, not full - size has to earn its way up once real data backs it.
 function ladder(costPerMillion: number | null, floorUsd: number): number {
-  if (costPerMillion == null) return Math.min(floorUsd, config.notionalUsd);
-  if (costPerMillion <= config.costLadderTier1UsdPerM) return config.notionalUsd;
-  if (costPerMillion <= config.costLadderTier2UsdPerM) return Math.min(config.costLadderNotionalMid, config.notionalUsd);
-  return Math.min(floorUsd, config.notionalUsd);
+  const full = config.notionalUsd;
+  const floor = Math.min(floorUsd, full);
+  if (costPerMillion == null) return floor;
+  const { costLadderTier1UsdPerM: lo, costLadderTier2UsdPerM: hi } = config;
+  if (costPerMillion <= lo) return full;
+  if (costPerMillion >= hi) return floor;
+  const frac = hi > lo ? (costPerMillion - lo) / (hi - lo) : 1;
+  return full + (floor - full) * frac;
 }
 
 const path = process.argv[2] || "logs/cycles.jsonl";
@@ -32,8 +37,9 @@ const rows: CycleSummary[] = readFileSync(path, "utf8")
   .sort((a, b) => a.ts - b.ts);
 
 console.log(
-  `ladder: full=$${config.notionalUsd} mid=$${config.costLadderNotionalMid} floor=$${config.costLadderNotionalFloor} ` +
-    `| tier1=$${config.costLadderTier1UsdPerM}/1M tier2=$${config.costLadderTier2UsdPerM}/1M over ${config.costLadderCycles} cycles`
+  `ladder: full=$${config.notionalUsd} floor=$${config.costLadderNotionalFloor} (continuous, linear) ` +
+    `| tier1=$${config.costLadderTier1UsdPerM}/1M tier2=$${config.costLadderTier2UsdPerM}/1M over ${config.costLadderCycles} cycles ` +
+    `| notify step $${config.costLadderNotifyStepUsd}`
 );
 console.log(`replaying ${rows.length} cycles from ${path}\n`);
 
@@ -42,10 +48,10 @@ let baseCost = 0;
 let simVol = 0;
 let simCost = 0;
 let blind = 0;
-let changes = 0;
-let prev = config.notionalUsd;
+let notifyEvents = 0;
+let lastNotified = config.notionalUsd;
 const recent: Array<{ costUsd: number; volumeUsd: number }> = [];
-const atRung = new Map<number, number>();
+const notionals: number[] = [];
 
 for (const d of rows) {
   const costUsd = cycleAllInCostUsd(d);
@@ -55,11 +61,11 @@ for (const d of rows) {
   const perMillion = costPerMillionUsd(recent, config.costLadderCycles);
   if (perMillion == null) blind++;
   const notional = ladder(perMillion, config.costLadderNotionalFloor);
-  if (notional !== prev) {
-    changes++;
-    prev = notional;
+  if (Math.abs(notional - lastNotified) >= config.costLadderNotifyStepUsd) {
+    notifyEvents++;
+    lastNotified = notional;
   }
-  atRung.set(notional, (atRung.get(notional) ?? 0) + 1);
+  notionals.push(notional);
 
   const scale = notional / config.notionalUsd;
   simVol += d.volumeUsd * scale;
@@ -78,7 +84,12 @@ console.log(
     `burn saved ${(100 * (1 - simCost / baseCost)).toFixed(0)}% ($${m(baseCost - simCost)})   ` +
     `no-reading ${((100 * blind) / rows.length).toFixed(1)}%`
 );
-console.log(`  rung changes: ${changes} (one per ${(rows.length / changes).toFixed(0)} cycles)`);
-for (const [notional, count] of [...atRung.entries()].sort((a, b) => b[0] - a[0])) {
-  console.log(`    $${String(notional).padStart(3)} notional: ${((100 * count) / rows.length).toFixed(1)}% of cycles`);
-}
+console.log(`  notify events: ${notifyEvents} (one per ${(rows.length / Math.max(notifyEvents, 1)).toFixed(0)} cycles, >= $${config.costLadderNotifyStepUsd} move)`);
+
+const sorted = [...notionals].sort((a, b) => a - b);
+const pct = (p: number) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))]!;
+const avg = notionals.reduce((s, n) => s + n, 0) / notionals.length;
+console.log(
+  `  notional distribution: min $${m(sorted[0]!)}  p25 $${m(pct(0.25))}  median $${m(pct(0.5))}  ` +
+    `p75 $${m(pct(0.75))}  max $${m(sorted[sorted.length - 1]!)}  avg $${m(avg)}`
+);

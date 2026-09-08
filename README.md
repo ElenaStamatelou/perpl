@@ -104,19 +104,25 @@ Every cycle prints a `[totals]` line with live volume, fees, and $-per-1M burn.
 Cost per $1M swings a lot - a rolling median near $63 but a p95 of $94 - and a fixed
 notional does full-size volume straight through the expensive stretches. The ladder
 measures all-in cost (fees - PnL) per $1M over the last `COST_LADDER_CYCLES` cycles
-and picks a size from it:
+and maps it to notional on a **continuous linear scale** (not discrete steps):
 
 | measured cost | notional |
 |---|---|
 | <= `COST_LADDER_TIER1_USD_PER_M` | `NOTIONAL_USD` (full) |
-| tier1 - `COST_LADDER_TIER2_USD_PER_M` | `COST_LADDER_NOTIONAL_MID` |
-| > tier2 | `COST_LADDER_NOTIONAL_FLOOR` |
+| >= `COST_LADDER_TIER2_USD_PER_M` | `COST_LADDER_NOTIONAL_FLOOR` |
+| between | straight line from full down to the floor |
+
+A small cost move produces a small size move - there's no fixed "mid" size any more
+(an earlier version stepped full -> mid -> floor; replaced 2026-09-08 so a small cost
+change never produces a jump). Since notional now moves every cycle, logging/ntfy is
+throttled separately by `COST_LADDER_NOTIFY_STEP_USD` - only announced once it's moved
+that many dollars since the last announcement (default $75, chosen to match the old
+step function's ~1-per-29-cycles cadence).
 
 Replayed over the 25,184 cycles in `logs/cycles.jsonl`: 58% of the volume kept for 51%
-less burn, $64.01 -> $54.01 per $1M (at the current `COST_LADDER_CYCLES=70`, ~1h at the
-observed pace - raised from an initial 12 (~10 min) on 2026-09-08 to cut rung-change
-flapping during a live WebSocket-instability episode, from ~1 per 8 cycles to ~1 per 29,
-with no material change to the outcome). Re-check against your own logs with
+less burn, $64.01 -> $53.69 per $1M (at the current `COST_LADDER_CYCLES=70`, ~1h at the
+observed pace - raised from an initial 12 (~10 min) on 2026-09-08 to cut flapping during
+a live WebSocket-instability episode). Re-check against your own logs with
 `npx tsx scripts/replay-ladder.ts`.
 
 Two things to understand before turning it on:
