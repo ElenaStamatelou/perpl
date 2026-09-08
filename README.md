@@ -112,8 +112,11 @@ and picks a size from it:
 | tier1 - `COST_LADDER_TIER2_USD_PER_M` | `COST_LADDER_NOTIONAL_MID` |
 | > tier2 | `COST_LADDER_NOTIONAL_FLOOR` |
 
-Replayed over the 25,184 cycles in `logs/cycles.jsonl`: 60% of the volume kept for 48%
-less burn, $64.01 -> $55.63 per $1M. Re-check against your own logs with
+Replayed over the 25,184 cycles in `logs/cycles.jsonl`: 58% of the volume kept for 51%
+less burn, $64.01 -> $54.01 per $1M (at the current `COST_LADDER_CYCLES=70`, ~1h at the
+observed pace - raised from an initial 12 (~10 min) on 2026-09-08 to cut rung-change
+flapping during a live WebSocket-instability episode, from ~1 per 8 cycles to ~1 per 29,
+with no material change to the outcome). Re-check against your own logs with
 `npx tsx scripts/replay-ladder.ts`.
 
 Two things to understand before turning it on:
