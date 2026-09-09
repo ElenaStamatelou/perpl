@@ -12,21 +12,7 @@ import { readFileSync } from "node:fs";
 import { config } from "../src/config.js";
 import { cycleAllInCostUsd, costPerMillionUsd } from "../src/metrics.js";
 import type { CycleSummary } from "../src/metrics.js";
-
-// Mirrors ladderNotionalUsd() in bot.ts, which can't be imported (bot.ts self-runs).
-// Continuous, not stepped: a straight line between full (at tier1) and floor (at
-// tier2). A null reading (cold start / post-restart, no evidence yet) maps to the
-// floor, not full - size has to earn its way up once real data backs it.
-function ladder(costPerMillion: number | null, floorUsd: number): number {
-  const full = config.notionalUsd;
-  const floor = Math.min(floorUsd, full);
-  if (costPerMillion == null) return floor;
-  const { costLadderTier1UsdPerM: lo, costLadderTier2UsdPerM: hi } = config;
-  if (costPerMillion <= lo) return full;
-  if (costPerMillion >= hi) return floor;
-  const frac = hi > lo ? (costPerMillion - lo) / (hi - lo) : 1;
-  return full + (floor - full) * frac;
-}
+import { ladderNotionalUsd as ladder, ladderPoints } from "../src/costLadder.js";
 
 const path = process.argv[2] || "logs/cycles.jsonl";
 const rows: CycleSummary[] = readFileSync(path, "utf8")
@@ -37,9 +23,10 @@ const rows: CycleSummary[] = readFileSync(path, "utf8")
   .sort((a, b) => a.ts - b.ts);
 
 console.log(
-  `ladder: full=$${config.notionalUsd} floor=$${config.costLadderNotionalFloor} (continuous, linear) ` +
-    `| tier1=$${config.costLadderTier1UsdPerM}/1M tier2=$${config.costLadderTier2UsdPerM}/1M over ${config.costLadderCycles} cycles ` +
-    `| notify step $${config.costLadderNotifyStepUsd}`
+  `ladder: ${ladderPoints()
+    .map((p) => `$${p.costPerMillion}/1M->$${p.notionalUsd}`)
+    .join(" ")} (piecewise linear) ` +
+    `over ${config.costLadderCycles} cycles | notify step $${config.costLadderNotifyStepUsd}`
 );
 console.log(`replaying ${rows.length} cycles from ${path}\n`);
 
@@ -49,7 +36,8 @@ let simVol = 0;
 let simCost = 0;
 let blind = 0;
 let notifyEvents = 0;
-let lastNotified = config.notionalUsd;
+let lastPushed = config.notionalUsd;
+let lastPushMs = 0;
 const recent: Array<{ costUsd: number; volumeUsd: number }> = [];
 const notionals: number[] = [];
 
@@ -61,9 +49,16 @@ for (const d of rows) {
   const perMillion = costPerMillionUsd(recent, config.costLadderCycles);
   if (perMillion == null) blind++;
   const notional = ladder(perMillion, config.costLadderNotionalFloor);
-  if (Math.abs(notional - lastNotified) >= config.costLadderNotifyStepUsd) {
+  // Mirrors bot.ts: a push needs both a >= step move since the last one sent AND
+  // costLadderNotifyMinIntervalSec of wall-clock since the last one sent.
+  if (
+    perMillion != null &&
+    Math.abs(notional - lastPushed) >= config.costLadderNotifyStepUsd &&
+    d.ts - lastPushMs >= config.costLadderNotifyMinIntervalSec * 1000
+  ) {
     notifyEvents++;
-    lastNotified = notional;
+    lastPushed = notional;
+    lastPushMs = d.ts;
   }
   notionals.push(notional);
 
@@ -84,7 +79,10 @@ console.log(
     `burn saved ${(100 * (1 - simCost / baseCost)).toFixed(0)}% ($${m(baseCost - simCost)})   ` +
     `no-reading ${((100 * blind) / rows.length).toFixed(1)}%`
 );
-console.log(`  notify events: ${notifyEvents} (one per ${(rows.length / Math.max(notifyEvents, 1)).toFixed(0)} cycles, >= $${config.costLadderNotifyStepUsd} move)`);
+console.log(
+  `  notify events: ${notifyEvents} (one per ${(rows.length / Math.max(notifyEvents, 1)).toFixed(0)} cycles; ` +
+    `>= $${config.costLadderNotifyStepUsd} move + >= ${config.costLadderNotifyMinIntervalSec}s apart)`
+);
 
 const sorted = [...notionals].sort((a, b) => a - b);
 const pct = (p: number) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))]!;

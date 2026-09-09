@@ -14,6 +14,7 @@ import { MetricsTracker, costPerMillionUsd } from "./metrics.js";
 import { OrderFlags, OrderType, type Account, type Position, type Wallet } from "./types.js";
 import { logCloseToXlsx, logPeriodSnapshotToXlsx } from "./xlsxLog.js";
 import { sendNtfyMessage } from "./ntfyNotifier.js";
+import { ladderNotionalUsd } from "./costLadder.js";
 
 // Two cadences: a frequent pulse (summary) and the slower full report that also
 // writes the xlsx snapshot row.
@@ -25,35 +26,35 @@ function fmtMillions(usd: number): string {
   return `$${(usd / 1e6).toFixed(2)}M`;
 }
 
+/**
+ * The recurring status push. Five short lines, split into "this period" vs "since
+ * start" so the reader can see both the recent pace and the running totals without
+ * decoding a wall of numbers. Full detail (per-period timestamps, cumulative
+ * volume/hour, etc.) still goes to the xlsx snapshot row, not here.
+ */
 function formatPeriodSummaryMessage(
   shared: SharedState,
   periodStartMs: number,
   periodEndMs: number,
   periodStartVolumeUsd: number
 ): string {
-  const durationMs = periodEndMs - shared.runStartMs;
-  const netCosts = shared.totalFeesUsd - shared.totalPnlUsd;
-  const costsPerMillion = shared.totalVolumeUsd > 0 ? (netCosts / shared.totalVolumeUsd) * 1e6 : 0;
-  const volumePerHour = durationMs > 0 ? shared.totalVolumeUsd / (durationMs / 3_600_000) : 0;
-  // Volume since the last snapshot, so each push shows the period on its own
+  const hoursRunning = (periodEndMs - shared.runStartMs) / 3_600_000;
+  const netCost = shared.totalFeesUsd - shared.totalPnlUsd;
+  const costPerMillion = shared.totalVolumeUsd > 0 ? (netCost / shared.totalVolumeUsd) * 1e6 : 0;
+  // Volume since the last push, so each one shows the recent pace on its own
   // rather than only an ever-growing cumulative number.
   const periodVolume = shared.totalVolumeUsd - periodStartVolumeUsd;
   const periodHours = (periodEndMs - periodStartMs) / 3_600_000;
-  const periodVolumePerHour = periodHours > 0 ? periodVolume / periodHours : 0;
+  const periodVolPerHour = periodHours > 0 ? periodVolume / periodHours : 0;
+  const pnl = shared.totalPnlUsd;
+  const pnlStr = `${pnl >= 0 ? "+" : "-"}$${Math.abs(pnl).toFixed(2)}`;
+  const deposit = shared.currentBalanceUsd != null ? `$${shared.currentBalanceUsd.toFixed(2)}` : "n/a";
   return (
-    `Period: ${new Date(periodStartMs).toISOString()} -> ${new Date(periodEndMs).toISOString()}\n` +
-    `Run duration so far: ${(durationMs / 3_600_000).toFixed(1)}h\n` +
-    // The cost ladder varies size at runtime (see ladderNotionalUsd) - reporting
-    // config.notionalUsd here would show the configured max, not what's actually
-    // trading right now, which is exactly what a "why is cost what it is" push
-    // needs to show.
-    `Notional: $${shared.currentNotionalUsd.toFixed(2)}/leg (max $${config.notionalUsd}) at ${config.leverage}x\n` +
-    `Deposit: $${shared.currentBalanceUsd?.toFixed(2) ?? "n/a"}\n` +
-    `This period: ${fmtMillions(periodVolume)} vol | ${fmtMillions(periodVolumePerHour)}/h\n` +
-    `Volume: ${fmtMillions(shared.totalVolumeUsd)}\n` +
-    `Fees: $${shared.totalFeesUsd.toFixed(2)} | PnL: $${shared.totalPnlUsd.toFixed(2)} | Net cost: $${netCosts.toFixed(2)}\n` +
-    `Cost: $${costsPerMillion.toFixed(0)} per $1M volume\n` +
-    `Volume/hour: ${fmtMillions(volumePerHour)}`
+    `Running ${hoursRunning.toFixed(1)}h. Size $${shared.currentNotionalUsd.toFixed(0)}/leg. Deposit ${deposit}.\n` +
+    `\n` +
+    `This period: ${fmtMillions(periodVolume)} volume (${fmtMillions(periodVolPerHour)}/h).\n` +
+    `Since start: ${fmtMillions(shared.totalVolumeUsd)} volume, cost $${costPerMillion.toFixed(0)}/1M.\n` +
+    `Fees $${shared.totalFeesUsd.toFixed(2)}, PnL ${pnlStr}, net cost $${netCost.toFixed(2)}.`
   );
 }
 
@@ -266,6 +267,14 @@ interface SharedState {
   // can be throttled to "moved at least costLadderNotifyStepUsd" without that
   // throttling affecting what's actually traded.
   lastNotifiedNotionalUsd: number;
+  // Wall-clock (ms) of the last "notional changed" ntfy push, and the notional it
+  // reported. Separate from lastNotifiedNotionalUsd so the push can additionally be
+  // rate-limited to one per costLadderNotifyMinIntervalSec - a burst of cycles that
+  // each clear costLadderNotifyStepUsd would otherwise fire several near-identical
+  // pushes within a minute. The next eligible push reports the move since
+  // lastPushedNotionalUsd, so a coalesced burst is still fully announced, once.
+  lastNotionalPushMs: number;
+  lastPushedNotionalUsd: number;
   // Ring buffer of the last costLadderCycles cycles, feeding the ladder's cost/$1M.
   // On `shared` for the same reason: a session-scoped history would be empty after
   // every reconnect, and an empty history means the floor (see ladderNotionalUsd).
@@ -283,16 +292,6 @@ interface SharedState {
   currentBalanceUsd?: number;
 }
 
-/**
- * Notional for the next open, from the all-in cost per $1M of recent cycles.
- * Cheap conditions get full size, expensive conditions progressively less.
- *
- * A null reading ("not enough cycles to judge yet") maps to the FLOOR, not full -
- * every cold start and every session restart (172 of them across 3 weeks of
- * history) starts with zero evidence conditions are cheap, so it starts small and
- * has to earn its way up to full size once a real window of low-cost cycles backs
- * it, rather than assuming it's safe by default.
- */
 /** Fees/$1M and PnL-drag/$1M (both positive-when-costly) over a set of cycles, for
  * ntfy messages that need the components, not just the total cost. */
 function windowBreakdown(cycles: ReadonlyArray<{ feeUsd: number; pnlUsd: number; volumeUsd: number }>): {
@@ -315,24 +314,6 @@ function windowBreakdown(cycles: ReadonlyArray<{ feeUsd: number; pnlUsd: number;
     pnlDragPerMillion: volumeUsd > 0 ? (-pnlUsd / volumeUsd) * 1e6 : 0,
     volumeUsd,
   };
-}
-
-/**
- * Linearly interpolates between notionalUsd (full, at cost <= tier1) and floorUsd
- * (at cost >= tier2) - a continuous scale rather than discrete rungs, so a small
- * move in cost produces a small move in size instead of a jump between fixed
- * steps. tier1/tier2 are the same two thresholds as before; there's no longer a
- * separate "mid" size - it falls wherever it falls on the line between the two.
- */
-function ladderNotionalUsd(costPerMillion: number | null, floorUsd: number): number {
-  const full = config.notionalUsd;
-  const floor = Math.min(floorUsd, full); // clamp: the floor can never exceed full
-  if (costPerMillion == null) return floor;
-  const { costLadderTier1UsdPerM: lo, costLadderTier2UsdPerM: hi } = config;
-  if (costPerMillion <= lo) return full;
-  if (costPerMillion >= hi) return floor;
-  const frac = hi > lo ? (costPerMillion - lo) / (hi - lo) : 1; // 0 at lo, 1 at hi
-  return full + (floor - full) * frac;
 }
 
 /**
@@ -392,9 +373,11 @@ async function runSession(shared: SharedState): Promise<void> {
     const startingNotionalUsd = config.costLadderCycles > 0 ? config.costLadderNotionalFloor : config.notionalUsd;
     await sendNtfyMessage(
       "Perpl Bot - connected",
-      startingNotionalUsd === config.notionalUsd
-        ? `Notional: $${config.notionalUsd}/leg at ${config.leverage}x`
-        : `Notional: starting at $${startingNotionalUsd} (floor), up to $${config.notionalUsd} max, at ${config.leverage}x`
+      `Trading ${market.symbol} at ${config.leverage}x.\n` +
+        (startingNotionalUsd === config.notionalUsd
+          ? `Size: $${config.notionalUsd}/leg.`
+          : `Size: starts $${startingNotionalUsd}/leg, up to $${config.notionalUsd} as costs allow.`),
+      { tags: "white_check_mark" }
     );
 
     const metrics = new MetricsTracker();
@@ -502,14 +485,13 @@ async function runSession(shared: SharedState): Promise<void> {
         // alone - see cycleAllInCostUsd in metrics.ts.
         if (costPerMillion != null && !shared.costLadderFirstReadingSent) {
           shared.costLadderFirstReadingSent = true;
-          const { feePerMillion, pnlDragPerMillion, volumeUsd } = windowBreakdown(shared.recentCycles);
+          const { feePerMillion, pnlDragPerMillion } = windowBreakdown(shared.recentCycles);
           await sendNtfyMessage(
             "Perpl Bot - first cost reading",
-            `First ${shared.recentCycles.length} cycles ($${volumeUsd.toFixed(2)} volume):\n` +
-              `Fees: $${feePerMillion.toFixed(2)}/1M\n` +
-              `PnL drag: $${pnlDragPerMillion.toFixed(2)}/1M\n` +
-              `Total cost: $${costPerMillion.toFixed(2)}/1M\n` +
-              `Notional now $${next.toFixed(2)}/leg.`
+            `Cost so far: $${costPerMillion.toFixed(0)}/1M ` +
+              `(fees $${feePerMillion.toFixed(0)} + PnL drag $${pnlDragPerMillion.toFixed(0)}).\n` +
+              `Trading size now $${next.toFixed(0)}/leg.`,
+            { tags: "bar_chart" }
           );
         }
 
@@ -531,22 +513,39 @@ async function runSession(shared: SharedState): Promise<void> {
             toNotionalUsd: next,
             floorUsd,
           });
-          // Skip the push (not the log/event above) for the very first, data-less
-          // assignment at session start - the "connected" message already announced
-          // "starting at the floor," so this would just repeat it with a confusing
-          // "$400 -> $3" using a notional that was never actually traded.
-          if (costPerMillion != null) {
-            const { feePerMillion, pnlDragPerMillion } = windowBreakdown(shared.recentCycles);
-            await sendNtfyMessage(
-              "Perpl Bot - notional changed",
-              `Last ${shared.recentCycles.length} cycles:\n` +
-                `Fees: $${feePerMillion.toFixed(2)}/1M\n` +
-                `PnL drag: $${pnlDragPerMillion.toFixed(2)}/1M\n` +
-                `Total cost: $${costPerMillion.toFixed(2)}/1M\n` +
-                `Notional: $${from.toFixed(2)} -> $${next.toFixed(2)}`
-            );
-          }
           shared.lastNotifiedNotionalUsd = next;
+        }
+
+        // The ntfy push is gated separately from the log/event above: additionally
+        // by wall-clock, so a burst of cycles that each clear the step threshold
+        // (seconds apart, on a steep/wide curve) produces at most one push per
+        // costLadderNotifyMinIntervalSec instead of several in the same minute. The
+        // move is measured from lastPushedNotionalUsd, so a coalesced burst is
+        // still reported in full - just as one "$A -> $B" line covering all of it.
+        //
+        // costPerMillion == null is the very first, data-less assignment at session
+        // start - skipped here (not the log/event): the "connected" message already
+        // said "starting at the floor," so this would repeat it as a confusing
+        // "$400 -> $3" using a notional that was never actually traded.
+        const nowMs = Date.now();
+        const pushDrift = Math.abs(next - shared.lastPushedNotionalUsd);
+        const cooldownMs = config.costLadderNotifyMinIntervalSec * 1000;
+        if (
+          costPerMillion != null &&
+          pushDrift >= config.costLadderNotifyStepUsd &&
+          nowMs - shared.lastNotionalPushMs >= cooldownMs
+        ) {
+          const { feePerMillion, pnlDragPerMillion } = windowBreakdown(shared.recentCycles);
+          const goingDown = next < shared.lastPushedNotionalUsd;
+          await sendNtfyMessage(
+            `Perpl Bot - size ${goingDown ? "down" : "up"} to $${next.toFixed(0)}/leg`,
+            `Cost now $${costPerMillion.toFixed(0)}/1M ` +
+              `(fees $${feePerMillion.toFixed(0)} + PnL drag $${pnlDragPerMillion.toFixed(0)}).\n` +
+              `Size: $${shared.lastPushedNotionalUsd.toFixed(0)} -> $${next.toFixed(0)}/leg.`,
+            { tags: goingDown ? "chart_with_downwards_trend" : "chart_with_upwards_trend" }
+          );
+          shared.lastNotionalPushMs = nowMs;
+          shared.lastPushedNotionalUsd = next;
         }
       }
 
@@ -705,7 +704,9 @@ async function runSession(shared: SharedState): Promise<void> {
           );
           shared.periodStartMs = closedAtMs;
           shared.periodStartVolumeUsd = shared.totalVolumeUsd;
-          await sendNtfyMessage(`Perpl Bot - ${config.summaryIntervalHours}h summary`, summaryMessage);
+          await sendNtfyMessage(`Perpl Bot - ${config.summaryIntervalHours}h summary`, summaryMessage, {
+            tags: "hourglass_flowing_sand",
+          });
         }
 
         // Slower full report: ntfy + the xlsx snapshot row, as before.
@@ -731,7 +732,9 @@ async function runSession(shared: SharedState): Promise<void> {
             },
             reportStartMs
           );
-          await sendNtfyMessage(`Perpl Bot - ${config.reportIntervalHours}h report`, reportMessage);
+          await sendNtfyMessage(`Perpl Bot - ${config.reportIntervalHours}h report`, reportMessage, {
+            tags: "clipboard",
+          });
         }
       } finally {
         watchdog.cancel();
@@ -774,6 +777,8 @@ async function main() {
     stopRequested: false,
     currentNotionalUsd: config.notionalUsd,
     lastNotifiedNotionalUsd: config.notionalUsd,
+    lastNotionalPushMs: 0,
+    lastPushedNotionalUsd: config.notionalUsd,
     recentCycles: [],
     costLadderFirstReadingSent: false,
   };

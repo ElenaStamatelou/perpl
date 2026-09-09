@@ -37,6 +37,40 @@ if (accountIdRaw && (!Number.isInteger(pinnedAccountId) || pinnedAccountId <= 0)
   throw new Error(`PERPL_ACCOUNT_ID must be a positive integer account id, got "${accountIdRaw}"`);
 }
 
+export interface LadderPoint {
+  costPerMillion: number;
+  notionalUsd: number;
+}
+
+/**
+ * Optional piecewise-linear cost -> notional curve. Format: "cost:notional" pairs,
+ * comma-separated, e.g. "50:5000,60:2000,65:500,70:3" - at/below the lowest cost
+ * the largest notional applies, at/above the highest cost the smallest applies,
+ * and every segment in between is a straight line. Points are sorted by cost here,
+ * so they may be given in any order. Blank/unset = fall back to the tier1/tier2
+ * two-point line (costLadderTier1UsdPerM -> notionalUsd down to
+ * costLadderTier2UsdPerM -> costLadderNotionalFloor).
+ */
+function parseLadderPoints(raw?: string): LadderPoint[] | null {
+  if (!raw?.trim()) return null;
+  const pts = raw
+    .split(",")
+    .map((pair) => pair.trim())
+    .filter(Boolean)
+    .map((pair): LadderPoint => {
+      const parts = pair.split(":");
+      const c = Number((parts[0] ?? "").trim());
+      const n = Number((parts[1] ?? "").trim());
+      if (parts.length !== 2 || !Number.isFinite(c) || !Number.isFinite(n) || n < 0) {
+        throw new Error(`COST_LADDER_POINTS: bad pair "${pair}" (want cost:notional, e.g. "60:2000")`);
+      }
+      return { costPerMillion: c, notionalUsd: n };
+    })
+    .sort((a, b) => a.costPerMillion - b.costPerMillion);
+  if (pts.length < 2) throw new Error(`COST_LADDER_POINTS: need at least 2 points, got ${pts.length}`);
+  return pts;
+}
+
 export const config = {
   network,
   apiUrl: process.env.PERPL_API_URL?.trim() || defaults.apiUrl,
@@ -126,6 +160,10 @@ export const config = {
   // continuous scale (2026-09-08) so a small cost move produces a small size
   // move instead of jumping between fixed steps.
   //
+  // COST_LADDER_POINTS overrides tier1/tier2 with a multi-breakpoint piecewise-
+  // linear curve when a curve with more than two knees is wanted - see
+  // parseLadderPoints and src/costLadder.ts.
+  //
   // The window is a cycle COUNT, not wall-clock: at the observed ~68 cycles/hr, a
   // time window empties out whenever the bot is skipping cycles - measured on the
   // historical logs it had too few samples to judge for 27% of cycles, and so fell
@@ -142,6 +180,8 @@ export const config = {
   costLadderTier1UsdPerM: Number(process.env.COST_LADDER_TIER1_USD_PER_M ?? 60),
   costLadderTier2UsdPerM: Number(process.env.COST_LADDER_TIER2_USD_PER_M ?? 70),
   costLadderNotionalFloor: Number(process.env.COST_LADDER_NOTIONAL_FLOOR ?? 3),
+  // Optional multi-breakpoint curve; overrides tier1/tier2 when set. See parseLadderPoints.
+  costLadderPoints: parseLadderPoints(process.env.COST_LADDER_POINTS),
   // The traded size now updates every cycle (continuous), but logging/alerting on
   // every tiny wiggle would be noise - only log/notify once it has moved at least
   // this many dollars from the last announced value, in either direction. $75
@@ -150,6 +190,13 @@ export const config = {
   // ~3x more often, since a continuous scale drifts a little every cycle while
   // transiting the tier1-tier2 band rather than sitting on a flat plateau.
   costLadderNotifyStepUsd: Number(process.env.COST_LADDER_NOTIFY_STEP_USD ?? 75),
+  // Floor on the wall-clock gap between two "notional changed" ntfy pushes. The
+  // step check above can trip on consecutive cycles (seconds apart) when the curve
+  // is steep or wide, firing near-identical pushes in the same minute. At most one
+  // push per this many seconds; the next eligible one reports the whole move since
+  // the last push actually sent, so nothing is lost - only coalesced. The log line
+  // and cost_ladder event are NOT rate-limited, only the push. 0 = no time gate.
+  costLadderNotifyMinIntervalSec: Number(process.env.COST_LADDER_NOTIFY_MIN_INTERVAL_SEC ?? 300),
 
   // Optional: periodic summary push via ntfy.sh (https://ntfy.sh/<topic>, no account
   // needed). Blank = disabled (no-op).
