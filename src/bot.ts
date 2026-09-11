@@ -152,6 +152,18 @@ function formatFullSummaryMessage(shared: SharedState, nowMs: number): string {
   );
 }
 
+/**
+ * Notional a fresh process actually starts trading at: the cost ladder's floor
+ * when it's enabled (a null cost - no cycle history yet - maps to the smallest
+ * notional on the curve, see ladderNotionalUsd), otherwise the configured max.
+ * Used both for the "connected" message and to seed SharedState's notional
+ * fields, so they can't drift apart and misreport the first ladder move after
+ * a restart as a jump from the configured max (which was never actually traded).
+ */
+function coldStartNotionalUsd(): number {
+  return config.costLadderCycles > 0 ? config.costLadderNotionalFloor : config.notionalUsd;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -360,13 +372,10 @@ interface SharedState {
   // can be throttled to "moved at least costLadderNotifyStepUsd" without that
   // throttling affecting what's actually traded.
   lastNotifiedNotionalUsd: number;
-  // Wall-clock (ms) of the last "notional changed" ntfy push, and the notional it
-  // reported. Separate from lastNotifiedNotionalUsd so the push can additionally be
-  // rate-limited to one per costLadderNotifyMinIntervalSec - a burst of cycles that
-  // each clear costLadderNotifyStepUsd would otherwise fire several near-identical
-  // pushes within a minute. The next eligible push reports the move since
-  // lastPushedNotionalUsd, so a coalesced burst is still fully announced, once.
-  lastNotionalPushMs: number;
+  // The notional value as of the last "notional changed" ntfy push. Separate from
+  // lastNotifiedNotionalUsd (the log/event's own throttle) purely so each can be
+  // read independently; both use the same costLadderNotifyStepUsd threshold and
+  // no wall-clock cooldown - every qualifying move gets pushed immediately.
   lastPushedNotionalUsd: number;
   // Ring buffer of the last costLadderCycles cycles, feeding the ladder's cost/$1M.
   // On `shared` for the same reason: a session-scoped history would be empty after
@@ -472,7 +481,7 @@ async function runSession(shared: SharedState): Promise<void> {
     // notionalUsd - see ladderNotionalUsd. Say so here rather than claiming the
     // configured max, which is what will actually happen only once cycles prove
     // it's cheap.
-    const startingNotionalUsd = config.costLadderCycles > 0 ? config.costLadderNotionalFloor : config.notionalUsd;
+    const startingNotionalUsd = coldStartNotionalUsd();
     await sendNtfyMessage(
       "Connected",
       `Trading ${market.symbol} at ${config.leverage}x.\n` +
@@ -618,25 +627,16 @@ async function runSession(shared: SharedState): Promise<void> {
           shared.lastNotifiedNotionalUsd = next;
         }
 
-        // The ntfy push is gated separately from the log/event above: additionally
-        // by wall-clock, so a burst of cycles that each clear the step threshold
-        // (seconds apart, on a steep/wide curve) produces at most one push per
-        // costLadderNotifyMinIntervalSec instead of several in the same minute. The
-        // move is measured from lastPushedNotionalUsd, so a coalesced burst is
-        // still reported in full - just as one "$A -> $B" line covering all of it.
+        // Every qualifying move gets pushed immediately - no wall-clock cooldown.
+        // Only gate left is the step threshold, so sub-$step wiggles on the
+        // continuous scale don't spam a push every cycle.
         //
         // costPerMillion == null is the very first, data-less assignment at session
         // start - skipped here (not the log/event): the "connected" message already
         // said "starting at the floor," so this would repeat it as a confusing
         // "$400 -> $3" using a notional that was never actually traded.
-        const nowMs = Date.now();
         const pushDrift = Math.abs(next - shared.lastPushedNotionalUsd);
-        const cooldownMs = config.costLadderNotifyMinIntervalSec * 1000;
-        if (
-          costPerMillion != null &&
-          pushDrift >= config.costLadderNotifyStepUsd &&
-          nowMs - shared.lastNotionalPushMs >= cooldownMs
-        ) {
+        if (costPerMillion != null && pushDrift >= config.costLadderNotifyStepUsd) {
           const { feePerMillion, pnlDragPerMillion } = windowBreakdown(shared.recentCycles);
           const goingDown = next < shared.lastPushedNotionalUsd;
           await sendNtfyMessage(
@@ -646,7 +646,6 @@ async function runSession(shared: SharedState): Promise<void> {
               `Notional: $${shared.lastPushedNotionalUsd.toFixed(0)} -> $${next.toFixed(0)}.`,
             { tags: goingDown ? "chart_with_downwards_trend" : "chart_with_upwards_trend" }
           );
-          shared.lastNotionalPushMs = nowMs;
           shared.lastPushedNotionalUsd = next;
         }
       }
@@ -890,10 +889,10 @@ async function main() {
     reportStartPnlUsd: 0,
     fullSummaryStartMs: Date.now(),
     stopRequested: false,
-    currentNotionalUsd: config.notionalUsd,
-    lastNotifiedNotionalUsd: config.notionalUsd,
-    lastNotionalPushMs: 0,
-    lastPushedNotionalUsd: config.notionalUsd,
+    // See coldStartNotionalUsd - matches what the first cycle actually trades.
+    currentNotionalUsd: coldStartNotionalUsd(),
+    lastNotifiedNotionalUsd: coldStartNotionalUsd(),
+    lastPushedNotionalUsd: coldStartNotionalUsd(),
     recentCycles: [],
     costLadderFirstReadingSent: false,
     lastCycleEndMs: Date.now(),

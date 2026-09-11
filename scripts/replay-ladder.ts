@@ -37,7 +37,6 @@ let simCost = 0;
 let blind = 0;
 let notifyEvents = 0;
 let lastPushed = config.notionalUsd;
-let lastPushMs = 0;
 const recent: Array<{ costUsd: number; volumeUsd: number }> = [];
 const notionals: number[] = [];
 
@@ -49,16 +48,11 @@ for (const d of rows) {
   const perMillion = costPerMillionUsd(recent, config.costLadderCycles);
   if (perMillion == null) blind++;
   const notional = ladder(perMillion, config.costLadderNotionalFloor);
-  // Mirrors bot.ts: a push needs both a >= step move since the last one sent AND
-  // costLadderNotifyMinIntervalSec of wall-clock since the last one sent.
-  if (
-    perMillion != null &&
-    Math.abs(notional - lastPushed) >= config.costLadderNotifyStepUsd &&
-    d.ts - lastPushMs >= config.costLadderNotifyMinIntervalSec * 1000
-  ) {
+  // Mirrors bot.ts: a push fires immediately once the move since the last one
+  // sent clears the step threshold - no wall-clock cooldown.
+  if (perMillion != null && Math.abs(notional - lastPushed) >= config.costLadderNotifyStepUsd) {
     notifyEvents++;
     lastPushed = notional;
-    lastPushMs = d.ts;
   }
   notionals.push(notional);
 
@@ -81,7 +75,7 @@ console.log(
 );
 console.log(
   `  notify events: ${notifyEvents} (one per ${(rows.length / Math.max(notifyEvents, 1)).toFixed(0)} cycles; ` +
-    `>= $${config.costLadderNotifyStepUsd} move + >= ${config.costLadderNotifyMinIntervalSec}s apart)`
+    `>= $${config.costLadderNotifyStepUsd} move)`
 );
 
 const sorted = [...notionals].sort((a, b) => a - b);

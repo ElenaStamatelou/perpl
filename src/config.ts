@@ -184,19 +184,10 @@ export const config = {
   costLadderPoints: parseLadderPoints(process.env.COST_LADDER_POINTS),
   // The traded size now updates every cycle (continuous), but logging/alerting on
   // every tiny wiggle would be noise - only log/notify once it has moved at least
-  // this many dollars from the last announced value, in either direction. $75
-  // reproduces roughly the same notify cadence as the old discrete rungs (~1 per
-  // 29 cycles, per scripts/replay-ladder.ts) - $20 was tried first and notified
-  // ~3x more often, since a continuous scale drifts a little every cycle while
-  // transiting the tier1-tier2 band rather than sitting on a flat plateau.
-  costLadderNotifyStepUsd: Number(process.env.COST_LADDER_NOTIFY_STEP_USD ?? 75),
-  // Floor on the wall-clock gap between two "notional changed" ntfy pushes. The
-  // step check above can trip on consecutive cycles (seconds apart) when the curve
-  // is steep or wide, firing near-identical pushes in the same minute. At most one
-  // push per this many seconds; the next eligible one reports the whole move since
-  // the last push actually sent, so nothing is lost - only coalesced. The log line
-  // and cost_ladder event are NOT rate-limited, only the push. 0 = no time gate.
-  costLadderNotifyMinIntervalSec: Number(process.env.COST_LADDER_NOTIFY_MIN_INTERVAL_SEC ?? 300),
+  // this many dollars from the last announced value, in either direction. No
+  // wall-clock throttle beyond this - every qualifying move gets pushed right
+  // away, so this is the only knob for notification frequency.
+  costLadderNotifyStepUsd: Number(process.env.COST_LADDER_NOTIFY_STEP_USD ?? 50),
 
   // Optional: periodic summary push via ntfy.sh (https://ntfy.sh/<topic>, no account
   // needed). Blank = disabled (no-op).
