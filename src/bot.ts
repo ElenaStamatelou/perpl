@@ -16,10 +16,10 @@ import { logCloseToXlsx, logPeriodSnapshotToXlsx } from "./xlsxLog.js";
 import { sendNtfyMessage } from "./ntfyNotifier.js";
 import { ladderNotionalUsd } from "./costLadder.js";
 
-// Two cadences: a frequent pulse (summary) and the slower full report that also
-// writes the xlsx snapshot row.
-const SUMMARY_INTERVAL_MS = config.summaryIntervalHours * 60 * 60 * 1000;
+// Two cadences: the "past N hours" report (also writes the xlsx snapshot row) and
+// the slower "since start" full summary.
 const REPORT_INTERVAL_MS = config.reportIntervalHours * 60 * 60 * 1000;
+const FULL_SUMMARY_INTERVAL_MS = config.fullSummaryIntervalHours * 60 * 60 * 1000;
 
 /** $12,345,678 -> "$12.35M". Volumes run to millions, so raw dollars are unreadable at a glance. */
 function fmtMillions(usd: number): string {
@@ -27,34 +27,128 @@ function fmtMillions(usd: number): string {
 }
 
 /**
- * The recurring status push. Five short lines, split into "this period" vs "since
- * start" so the reader can see both the recent pace and the running totals without
- * decoding a wall of numbers. Full detail (per-period timestamps, cumulative
- * volume/hour, etc.) still goes to the xlsx snapshot row, not here.
+ * Buckets for "how much time did the cost ladder spend at roughly what notional,
+ * and how expensive was trading while it was there" - both expressed as fractions
+ * of config.notionalUsd (the ladder's full size) so the buckets stay meaningful
+ * regardless of what NOTIONAL_USD/COST_LADDER_NOTIONAL_FLOOR are set to.
  */
-function formatPeriodSummaryMessage(
+const NOTIONAL_RANGES = [
+  { label: "Full", minFrac: 0.8 },
+  { label: "High", minFrac: 0.5 },
+  { label: "Mid", minFrac: 0.2 },
+  { label: "Low", minFrac: 0.05 },
+  { label: "Floor", minFrac: -Infinity },
+] as const;
+type RangeLabel = (typeof NOTIONAL_RANGES)[number]["label"];
+
+type RangeStats = Record<RangeLabel, { timeMs: number; feeUsd: number; pnlUsd: number; volumeUsd: number }>;
+
+function freshRangeStats(): RangeStats {
+  const stats = {} as RangeStats;
+  for (const r of NOTIONAL_RANGES) stats[r.label] = { timeMs: 0, feeUsd: 0, pnlUsd: 0, volumeUsd: 0 };
+  return stats;
+}
+
+function notionalRangeLabel(notionalUsd: number, maxUsd: number): RangeLabel {
+  const frac = maxUsd > 0 ? notionalUsd / maxUsd : 0;
+  for (const r of NOTIONAL_RANGES) {
+    if (frac >= r.minFrac) return r.label;
+  }
+  return "Floor";
+}
+
+/** Human $ bounds for a range's label, e.g. "Full" at maxUsd=400 -> ">=$320". */
+function rangeBoundsLabel(label: RangeLabel, maxUsd: number): string {
+  const idx = NOTIONAL_RANGES.findIndex((r) => r.label === label);
+  const lo = NOTIONAL_RANGES[idx]!.minFrac;
+  const hi = idx > 0 ? NOTIONAL_RANGES[idx - 1]!.minFrac : Infinity;
+  if (hi === Infinity) return `>=$${(maxUsd * lo).toFixed(0)}`;
+  if (lo === -Infinity) return `<$${(maxUsd * hi).toFixed(0)}`;
+  return `$${(maxUsd * lo).toFixed(0)}-${(maxUsd * hi).toFixed(0)}`;
+}
+
+function addCycleToRangeStats(
+  stats: RangeStats,
+  label: RangeLabel,
+  elapsedMs: number,
+  cycle: { feeUsd: number; pnlUsd: number; volumeUsd: number }
+): void {
+  const bucket = stats[label];
+  bucket.timeMs += elapsedMs;
+  bucket.feeUsd += cycle.feeUsd;
+  bucket.pnlUsd += cycle.pnlUsd;
+  bucket.volumeUsd += cycle.volumeUsd;
+}
+
+/**
+ * Renders the "how much time at what notional, and how expensive" breakdown.
+ * Skips ranges the ladder never visited in this window, so a mostly-full or
+ * mostly-floor period doesn't print empty rows.
+ */
+function formatRangeBreakdown(stats: RangeStats, maxUsd: number): string {
+  const totalMs = NOTIONAL_RANGES.reduce((s, r) => s + stats[r.label].timeMs, 0);
+  if (totalMs <= 0) return "";
+  const lines = NOTIONAL_RANGES.map((r) => {
+    const s = stats[r.label];
+    if (s.timeMs <= 0) return null;
+    const pct = (s.timeMs / totalMs) * 100;
+    const costPerMillion = s.volumeUsd > 0 ? ((s.feeUsd - s.pnlUsd) / s.volumeUsd) * 1e6 : null;
+    const costStr = costPerMillion != null ? `$${costPerMillion.toFixed(0)}/1M` : "n/a";
+    return `  ${r.label} ${rangeBoundsLabel(r.label, maxUsd)}: ${pct.toFixed(0)}% time, ${costStr}`;
+  }).filter((l): l is string => l != null);
+  return lines.join("\n");
+}
+
+/**
+ * The "past N hours" report push: this period's volume/cost/notional-range mix,
+ * not the running totals since start (that's formatFullSummaryMessage below).
+ */
+function formatPeriodReportMessage(
   shared: SharedState,
   periodStartMs: number,
   periodEndMs: number,
-  periodStartVolumeUsd: number
+  periodStartVolumeUsd: number,
+  periodStartFeesUsd: number,
+  periodStartPnlUsd: number,
+  rangeStats: RangeStats
 ): string {
-  const hoursRunning = (periodEndMs - shared.runStartMs) / 3_600_000;
-  const netCost = shared.totalFeesUsd - shared.totalPnlUsd;
-  const costPerMillion = shared.totalVolumeUsd > 0 ? (netCost / shared.totalVolumeUsd) * 1e6 : 0;
-  // Volume since the last push, so each one shows the recent pace on its own
-  // rather than only an ever-growing cumulative number.
   const periodVolume = shared.totalVolumeUsd - periodStartVolumeUsd;
+  const periodFees = shared.totalFeesUsd - periodStartFeesUsd;
+  const periodPnl = shared.totalPnlUsd - periodStartPnlUsd;
+  const periodNetCost = periodFees - periodPnl;
+  const periodCostPerMillion = periodVolume > 0 ? (periodNetCost / periodVolume) * 1e6 : 0;
   const periodHours = (periodEndMs - periodStartMs) / 3_600_000;
   const periodVolPerHour = periodHours > 0 ? periodVolume / periodHours : 0;
+  const pnlStr = `${periodPnl >= 0 ? "+" : "-"}$${Math.abs(periodPnl).toFixed(2)}`;
+  const deposit = shared.currentBalanceUsd != null ? `$${shared.currentBalanceUsd.toFixed(2)}` : "n/a";
+  const breakdown = formatRangeBreakdown(rangeStats, config.notionalUsd);
+  return (
+    `Notional $${shared.currentNotionalUsd.toFixed(0)}. Deposit ${deposit}.\n` +
+    `\n` +
+    `Past ${periodHours.toFixed(1)}h: ${fmtMillions(periodVolume)} volume (${fmtMillions(periodVolPerHour)}/h), cost $${periodCostPerMillion.toFixed(0)}/1M.\n` +
+    `Fees $${periodFees.toFixed(2)}, PnL ${pnlStr}, net cost $${periodNetCost.toFixed(2)}.` +
+    (breakdown ? `\n\nNotional time:\n${breakdown}` : "")
+  );
+}
+
+/**
+ * The "since start" full summary push - running totals for the whole run, sent
+ * roughly once a day rather than on every report cadence.
+ */
+function formatFullSummaryMessage(shared: SharedState, nowMs: number): string {
+  const hoursRunning = (nowMs - shared.runStartMs) / 3_600_000;
+  const netCost = shared.totalFeesUsd - shared.totalPnlUsd;
+  const costPerMillion = shared.totalVolumeUsd > 0 ? (netCost / shared.totalVolumeUsd) * 1e6 : 0;
   const pnl = shared.totalPnlUsd;
   const pnlStr = `${pnl >= 0 ? "+" : "-"}$${Math.abs(pnl).toFixed(2)}`;
   const deposit = shared.currentBalanceUsd != null ? `$${shared.currentBalanceUsd.toFixed(2)}` : "n/a";
+  const breakdown = formatRangeBreakdown(shared.lifetimeRangeStats, config.notionalUsd);
   return (
-    `Running ${hoursRunning.toFixed(1)}h. Size $${shared.currentNotionalUsd.toFixed(0)}/leg. Deposit ${deposit}.\n` +
+    `Running ${hoursRunning.toFixed(1)}h. Notional $${shared.currentNotionalUsd.toFixed(0)}. Deposit ${deposit}.\n` +
     `\n` +
-    `This period: ${fmtMillions(periodVolume)} volume (${fmtMillions(periodVolPerHour)}/h).\n` +
     `Since start: ${fmtMillions(shared.totalVolumeUsd)} volume, cost $${costPerMillion.toFixed(0)}/1M.\n` +
-    `Fees $${shared.totalFeesUsd.toFixed(2)}, PnL ${pnlStr}, net cost $${netCost.toFixed(2)}.`
+    `Fees $${shared.totalFeesUsd.toFixed(2)}, PnL ${pnlStr}, net cost $${netCost.toFixed(2)}.` +
+    (breakdown ? `\n\nNotional time:\n${breakdown}` : "")
   );
 }
 
@@ -245,17 +339,16 @@ interface SharedState {
   // on-chain (block, tx, log) coordinate, which is unique per fill.
   seenFillKeys: Set<string>;
   runStartMs: number;
-  // Start of the current summary window (see SUMMARY_INTERVAL_MS below) -
-  // survives restarts same as the totals, so a mid-window restart doesn't reset
-  // the clock and produce a short extra row.
-  periodStartMs: number;
-  // Cumulative volume as of periodStartMs, so a snapshot can report the period's
-  // own volume rather than only the run-long cumulative figure.
-  periodStartVolumeUsd: number;
-  // Same pair for the slower report window (REPORT_INTERVAL_MS), tracked
-  // separately so the two cadences don't reset each other.
+  // Start of the current report window (REPORT_INTERVAL_MS) - survives restarts
+  // same as the totals, so a mid-window restart doesn't reset the clock and
+  // produce a short extra row. The report message covers only this window (see
+  // formatPeriodReportMessage), so its fees/PnL are tracked from the same point.
   reportStartMs: number;
   reportStartVolumeUsd: number;
+  reportStartFeesUsd: number;
+  reportStartPnlUsd: number;
+  // Wall-clock of the last "since start" full summary push (FULL_SUMMARY_INTERVAL_MS).
+  fullSummaryStartMs: number;
   stopRequested: boolean;
   // Notional the cost ladder has chosen for the next open. Lives here rather than
   // on the session (or as a config mutation) so a session restart doesn't silently
@@ -290,6 +383,15 @@ interface SharedState {
   // initialBalanceUsd is captured once (first balance seen) and never overwritten.
   initialBalanceUsd?: number;
   currentBalanceUsd?: number;
+  // Wall-clock of the last cycle close, so each cycle's notional can be credited
+  // with the time that actually elapsed while it was active (open+close+rest),
+  // for the "time spent in each notional range" breakdown below.
+  lastCycleEndMs: number;
+  // Time/fee/PnL/volume per notional range (see NOTIONAL_RANGES), two copies:
+  // one reset every report window (REPORT_INTERVAL_MS), one that accumulates
+  // for the whole run (fed into the "since start" full summary).
+  reportRangeStats: RangeStats;
+  lifetimeRangeStats: RangeStats;
 }
 
 /** Fees/$1M and PnL-drag/$1M (both positive-when-costly) over a set of cycles, for
@@ -372,11 +474,11 @@ async function runSession(shared: SharedState): Promise<void> {
     // it's cheap.
     const startingNotionalUsd = config.costLadderCycles > 0 ? config.costLadderNotionalFloor : config.notionalUsd;
     await sendNtfyMessage(
-      "Perpl Bot - connected",
+      "Connected",
       `Trading ${market.symbol} at ${config.leverage}x.\n` +
         (startingNotionalUsd === config.notionalUsd
-          ? `Size: $${config.notionalUsd}/leg.`
-          : `Size: starts $${startingNotionalUsd}/leg, up to $${config.notionalUsd} as costs allow.`),
+          ? `Notional: $${config.notionalUsd}.`
+          : `Notional: starts $${startingNotionalUsd}, up to $${config.notionalUsd} as costs allow.`),
       { tags: "white_check_mark" }
     );
 
@@ -487,10 +589,10 @@ async function runSession(shared: SharedState): Promise<void> {
           shared.costLadderFirstReadingSent = true;
           const { feePerMillion, pnlDragPerMillion } = windowBreakdown(shared.recentCycles);
           await sendNtfyMessage(
-            "Perpl Bot - first cost reading",
+            "First cost reading",
             `Cost so far: $${costPerMillion.toFixed(0)}/1M ` +
               `(fees $${feePerMillion.toFixed(0)} + PnL drag $${pnlDragPerMillion.toFixed(0)}).\n` +
-              `Trading size now $${next.toFixed(0)}/leg.`,
+              `Trading notional now $${next.toFixed(0)}.`,
             { tags: "bar_chart" }
           );
         }
@@ -538,10 +640,10 @@ async function runSession(shared: SharedState): Promise<void> {
           const { feePerMillion, pnlDragPerMillion } = windowBreakdown(shared.recentCycles);
           const goingDown = next < shared.lastPushedNotionalUsd;
           await sendNtfyMessage(
-            `Perpl Bot - size ${goingDown ? "down" : "up"} to $${next.toFixed(0)}/leg`,
+            `Notional ${goingDown ? "down" : "up"} to $${next.toFixed(0)}`,
             `Cost now $${costPerMillion.toFixed(0)}/1M ` +
               `(fees $${feePerMillion.toFixed(0)} + PnL drag $${pnlDragPerMillion.toFixed(0)}).\n` +
-              `Size: $${shared.lastPushedNotionalUsd.toFixed(0)} -> $${next.toFixed(0)}/leg.`,
+              `Notional: $${shared.lastPushedNotionalUsd.toFixed(0)} -> $${next.toFixed(0)}.`,
             { tags: goingDown ? "chart_with_downwards_trend" : "chart_with_upwards_trend" }
           );
           shared.lastNotionalPushMs = nowMs;
@@ -658,17 +760,27 @@ async function runSession(shared: SharedState): Promise<void> {
           notionalUsd: shared.currentNotionalUsd,
         });
 
-        shared.recentCycles.push({
+        const cycleCost = {
           feeUsd: (summary.bpsBurned / 10000) * summary.volumeUsd,
           pnlUsd: summary.pnlUsd ?? 0,
           volumeUsd: summary.volumeUsd,
-        });
+        };
+        shared.recentCycles.push(cycleCost);
         // Trim to the window. This array outlives sessions, so it must not grow
         // unbounded across a multi-day run.
         const keepCycles = Math.max(config.costLadderCycles, 1);
         if (shared.recentCycles.length > keepCycles) {
           shared.recentCycles.splice(0, shared.recentCycles.length - keepCycles);
         }
+
+        // Credit this cycle's notional range with the wall-clock time that just
+        // elapsed (open+close+rest), for the "time spent per notional range"
+        // breakdown in the report/full-summary pushes below.
+        const cycleElapsedMs = Math.max(0, closedAtMs - shared.lastCycleEndMs);
+        shared.lastCycleEndMs = closedAtMs;
+        const rangeLabel = notionalRangeLabel(shared.currentNotionalUsd, config.notionalUsd);
+        addCycleToRangeStats(shared.reportRangeStats, rangeLabel, cycleElapsedMs, cycleCost);
+        addCycleToRangeStats(shared.lifetimeRangeStats, rangeLabel, cycleElapsedMs, cycleCost);
         console.log(
           `[cycle ${cycleId}] done: PnL ${pnlUsd < 0 ? "-" : "+"}$${Math.abs(pnlUsd).toFixed(2)}, ` +
             `held ${((summary.holdTimeMs ?? 0) / 1000).toFixed(1)}s ` +
@@ -691,35 +803,27 @@ async function runSession(shared: SharedState): Promise<void> {
           cumulativeVolumeUsd: shared.totalVolumeUsd,
         });
 
-        // Frequent pulse: ntfy only, no xlsx row (it would bloat the sheet).
-        if (closedAtMs - shared.periodStartMs >= SUMMARY_INTERVAL_MS) {
-          const periodStartMs = shared.periodStartMs;
-          // Format before rolling the window forward - the message reports the
-          // period's own volume off the window's opening volume.
-          const summaryMessage = formatPeriodSummaryMessage(
-            shared,
-            periodStartMs,
-            closedAtMs,
-            shared.periodStartVolumeUsd
-          );
-          shared.periodStartMs = closedAtMs;
-          shared.periodStartVolumeUsd = shared.totalVolumeUsd;
-          await sendNtfyMessage(`Perpl Bot - ${config.summaryIntervalHours}h summary`, summaryMessage, {
-            tags: "hourglass_flowing_sand",
-          });
-        }
-
-        // Slower full report: ntfy + the xlsx snapshot row, as before.
+        // "Past N hours" report: ntfy + the xlsx snapshot row, covering only this
+        // window (not the running totals since start - see formatFullSummaryMessage
+        // below for that).
         if (closedAtMs - shared.reportStartMs >= REPORT_INTERVAL_MS) {
           const reportStartMs = shared.reportStartMs;
-          const reportMessage = formatPeriodSummaryMessage(
+          // Format before rolling the window forward - the message reports the
+          // period's own volume/fees/PnL off the window's opening figures.
+          const reportMessage = formatPeriodReportMessage(
             shared,
             reportStartMs,
             closedAtMs,
-            shared.reportStartVolumeUsd
+            shared.reportStartVolumeUsd,
+            shared.reportStartFeesUsd,
+            shared.reportStartPnlUsd,
+            shared.reportRangeStats
           );
           shared.reportStartMs = closedAtMs;
           shared.reportStartVolumeUsd = shared.totalVolumeUsd;
+          shared.reportStartFeesUsd = shared.totalFeesUsd;
+          shared.reportStartPnlUsd = shared.totalPnlUsd;
+          shared.reportRangeStats = freshRangeStats();
           await logPeriodSnapshotToXlsx(
             {
               atMs: closedAtMs,
@@ -732,8 +836,18 @@ async function runSession(shared: SharedState): Promise<void> {
             },
             reportStartMs
           );
-          await sendNtfyMessage(`Perpl Bot - ${config.reportIntervalHours}h report`, reportMessage, {
+          await sendNtfyMessage(`${config.reportIntervalHours}h report`, reportMessage, {
             tags: "clipboard",
+          });
+        }
+
+        // "Since start" full summary: ntfy only, roughly once a day - the running
+        // totals the report above deliberately no longer carries every time.
+        if (closedAtMs - shared.fullSummaryStartMs >= FULL_SUMMARY_INTERVAL_MS) {
+          const summaryMessage = formatFullSummaryMessage(shared, closedAtMs);
+          shared.fullSummaryStartMs = closedAtMs;
+          await sendNtfyMessage(`${config.fullSummaryIntervalHours}h summary`, summaryMessage, {
+            tags: "hourglass_flowing_sand",
           });
         }
       } finally {
@@ -770,10 +884,11 @@ async function main() {
     totalPnlUsd: 0,
     seenFillKeys: new Set(),
     runStartMs: Date.now(),
-    periodStartMs: Date.now(),
-    periodStartVolumeUsd: 0,
     reportStartMs: Date.now(),
     reportStartVolumeUsd: 0,
+    reportStartFeesUsd: 0,
+    reportStartPnlUsd: 0,
+    fullSummaryStartMs: Date.now(),
     stopRequested: false,
     currentNotionalUsd: config.notionalUsd,
     lastNotifiedNotionalUsd: config.notionalUsd,
@@ -781,6 +896,9 @@ async function main() {
     lastPushedNotionalUsd: config.notionalUsd,
     recentCycles: [],
     costLadderFirstReadingSent: false,
+    lastCycleEndMs: Date.now(),
+    reportRangeStats: freshRangeStats(),
+    lifetimeRangeStats: freshRangeStats(),
   };
 
   // SIGINT (Ctrl+C in a foreground terminal) and SIGTERM (pm2 stop, plain `kill`,

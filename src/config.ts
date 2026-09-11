@@ -204,8 +204,8 @@ export const config = {
 
   // Two push cadences, both only checked when a cycle closes (so the real gap
   // rounds up to the next cycle boundary):
-  //   summary - frequent pulse, ntfy only
-  //   report  - slower full report, ntfy + the xlsx snapshot row
-  summaryIntervalHours: Number(process.env.SUMMARY_INTERVAL_HOURS) || 2,
+  //   report      - "past N hours" pulse, ntfy + the xlsx snapshot row
+  //   fullSummary - "since start" totals, ntfy only, roughly once a day
   reportIntervalHours: Number(process.env.REPORT_INTERVAL_HOURS) || 12,
+  fullSummaryIntervalHours: Number(process.env.FULL_SUMMARY_INTERVAL_HOURS) || 24,
 };

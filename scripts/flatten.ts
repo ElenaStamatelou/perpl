@@ -85,7 +85,7 @@ async function fail(reason: string): Promise<never> {
     `Open positions: ${open.length}${open.length ? ` (pid ${open.map((p) => p.pid).join(", ")})` : ""}\n` +
     `Close them by hand: npx tsx scripts/check-live-state.ts / scripts/flatten.ts`;
   console.error(`[flatten] FAILED - ${detail}`);
-  await sendNtfyMessage("Perpl Bot - FLATTEN FAILED", detail);
+  await sendNtfyMessage("FLATTEN FAILED", detail);
   trading.disconnect();
   process.exit(1);
 }
@@ -152,7 +152,7 @@ async function run(): Promise<void> {
         clearTimeout(overallTimer);
         console.log("[flatten] account is flat: no working orders, no open positions.");
         await sendNtfyMessage(
-          "Perpl Bot - flat",
+          "Flat",
           `Account ${accountId} verified flat: no working orders, no open positions.\n` +
             (cancelled + closed > 0
               ? `Cleaned up on the way out: ${cancelled} order(s) cancelled, ${closed} position(s) closed.`
