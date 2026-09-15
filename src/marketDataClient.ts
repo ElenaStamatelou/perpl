@@ -20,6 +20,7 @@ export class MarketDataClient extends EventEmitter {
   private asks = new Map<number, Level>();
   private lastSn?: number;
   private retryCount = 0;
+  private reconnectTimer?: ReturnType<typeof setTimeout>;
   private closedByUser = false;
   private lastMessageAt = 0;
   private staleInterval?: ReturnType<typeof setInterval>;
@@ -32,6 +33,7 @@ export class MarketDataClient extends EventEmitter {
 
   connect(): void {
     this.closedByUser = false;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.ws = new WebSocket(`${config.wsUrl}/ws/v1/market-data`);
 
     this.ws.on("open", () => {
@@ -68,6 +70,10 @@ export class MarketDataClient extends EventEmitter {
   disconnect(): void {
     this.closedByUser = true;
     if (this.staleInterval) clearInterval(this.staleInterval);
+    // See TradingClient.disconnect - a server-initiated close can race ahead of
+    // this call and already have scheduled a reconnect; cancel it so an
+    // abandoned instance doesn't keep reconnecting in the background.
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.ws?.close();
   }
 
@@ -186,6 +192,6 @@ export class MarketDataClient extends EventEmitter {
   private scheduleReconnect(): void {
     const delay = RETRY_DELAYS_MS[Math.min(this.retryCount, RETRY_DELAYS_MS.length - 1)];
     this.retryCount++;
-    setTimeout(() => this.connect(), delay);
+    this.reconnectTimer = setTimeout(() => this.connect(), delay);
   }
 }

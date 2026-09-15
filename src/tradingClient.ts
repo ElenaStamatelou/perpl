@@ -48,6 +48,7 @@ export class TradingClient extends EventEmitter {
   private positions = new Map<number, Position>(); // pid -> latest known Position
   private pingInterval?: ReturnType<typeof setInterval>;
   private retryCount = 0;
+  private reconnectTimer?: ReturnType<typeof setTimeout>;
   private closedByUser = false;
   private authenticated = false;
   private lastMessageAt = 0;
@@ -58,6 +59,7 @@ export class TradingClient extends EventEmitter {
 
   connect(): void {
     this.closedByUser = false;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.ws = new WebSocket(`${config.wsUrl}/ws/v1/trading`);
 
     this.ws.on("open", async () => {
@@ -102,6 +104,17 @@ export class TradingClient extends EventEmitter {
     this.closedByUser = true;
     if (this.pingInterval) clearInterval(this.pingInterval);
     if (this.staleInterval) clearInterval(this.staleInterval);
+    // A server-initiated close can race ahead of this call and already have
+    // scheduled a reconnect (see scheduleReconnect) before closedByUser flips
+    // true. Without cancelling it, that timer fires anyway and reconnects this
+    // abandoned instance in the background - bot.ts creates a fresh TradingClient
+    // per session, so an abandoned one left running is a zombie: it keeps
+    // authenticating the same account on its own schedule, invisible to the
+    // supervisor. Observed live: repeated code-1008 closes left several of these
+    // running at once, all competing to auth the same account, which is the most
+    // likely reason the server kept rejecting every connection with 1008 for the
+    // next 36h straight - a self-sustaining lockout from one bad reconnect race.
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.ws?.close();
   }
 
@@ -421,6 +434,6 @@ export class TradingClient extends EventEmitter {
   private scheduleReconnect(): void {
     const delay = RETRY_DELAYS_MS[Math.min(this.retryCount, RETRY_DELAYS_MS.length - 1)];
     this.retryCount++;
-    setTimeout(() => this.connect(), delay);
+    this.reconnectTimer = setTimeout(() => this.connect(), delay);
   }
 }
