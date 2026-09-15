@@ -539,6 +539,27 @@ async function runSession(shared: SharedState): Promise<void> {
         console.log(`Reached max runtime (${config.maxRuntimeMin} min). Stopping.`);
         return;
       }
+      // Checked here (not mid-cycle) so it only ever fires between cycles, with
+      // no position open - a clean stop, no flatten needed. currentBalanceUsd is
+      // updated live from wallet/account WS pushes (see updateBalance below), so
+      // this reacts within a cycle or two of a settlement crossing the floor,
+      // not on some separate poll cadence.
+      if (
+        config.minBalanceUsd > 0 &&
+        shared.currentBalanceUsd != null &&
+        shared.currentBalanceUsd <= config.minBalanceUsd
+      ) {
+        console.log(
+          `Balance $${shared.currentBalanceUsd.toFixed(2)} at/below floor $${config.minBalanceUsd}. Stopping.`
+        );
+        await sendNtfyMessage(
+          "Stopped: balance floor reached",
+          `Balance $${shared.currentBalanceUsd.toFixed(2)} reached your $${config.minBalanceUsd} floor.\n` +
+            `Bot stopped - no position was open, nothing to flatten.`,
+          { tags: "warning", priority: "urgent" }
+        );
+        return;
+      }
 
       // Trend guard: opening into a trending market gets adversely selected maker
       // fills that close at a worse price. Wait for chop instead of paying for it.

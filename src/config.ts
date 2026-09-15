@@ -128,6 +128,10 @@ export const config = {
   maxRuntimeMin: Number(process.env.MAX_RUNTIME_HOURS) > 0
     ? Number(process.env.MAX_RUNTIME_HOURS) * 60
     : Number(process.env.MAX_RUNTIME_MIN) || 0,
+  // Budget stop-loss: stop cleanly (between cycles, no position open) once the
+  // deposit balance drops to/below this. Checked against the live balance from
+  // wallet/account WS pushes, not a separate poll. 0 = disabled.
+  minBalanceUsd: Number(process.env.MIN_BALANCE_USD) || 0,
   cycleRestMs: Number(process.env.CYCLE_REST_MS) || 1000,
   // Optional: if both set, the rest between cycles is randomized in this range
   // instead of using the fixed cycleRestMs above.
